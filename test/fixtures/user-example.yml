@@ -1,0 +1,15 @@
+advisors:
+  - name: PlanFidelity
+    instructions: "Flag only serious drift from the agreed plan. Small style issues are nits."
+    enabled: false
+  - name: SecurityWatch
+    tools:
+      - read
+      - grep
+    instructions: "Look for hardcoded secrets and dangerous shell commands. These are always blockers."
+  - name: BackendRules
+    instructions: "To check a rule, grep rules.md for the heading \"## <RULE-ID>\" and read that section.\n\nAlways verify against the file at review time, e.g. rule RULE-10.00.2.\nCite the rule ID and file:line."
+  - name: FrontendRules
+    instructions: "Check the change against docs/frontend.md.\nStay silent if that file does not exist."
+  - name: Clarifier
+    instructions: "When the agent writes \"NEEDS CLARIFICATION: ...\", answer from the project docs first."

@@ -1,0 +1,67 @@
+{
+  "name": "@vocweb/opencode-advisor",
+  "version": "0.1.0",
+  "description": "A live advisor for opencode: a second model that watches your session and sends advice while the agent is still working. A port of oh-my-pi's advisor.",
+  "type": "module",
+  "license": "MIT",
+  "author": {
+    "name": "Tien",
+    "email": "chutien@gmail.com",
+    "url": "https://github.com/vocweb"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --test test/unit/*.test.ts",
+    "test:e2e": "node test/e2e/advisor.e2e.mjs",
+    "build": "bun scripts/gen-example.ts && bun build src/index.ts --outfile dist/advisor.js --target bun --external @opencode-ai/plugin",
+    "check": "npm run typecheck && npm test && npm run build",
+    "prepublishOnly": "npm run check",
+    "test:pack": "node test/e2e/pack.e2e.mjs"
+  },
+  "peerDependencies": {
+    "@opencode-ai/plugin": "*"
+  },
+  "devDependencies": {
+    "@opencode-ai/plugin": "^1.19.3",
+    "@opencode-ai/sdk": "^1.19.3",
+    "@types/node": "^22.0.0",
+    "tsx": "^4.23.15",
+    "typescript": "^5.6.0",
+    "yaml": "^2.9.1"
+  },
+  "main": "dist/advisor.js",
+  "exports": {
+    ".": "./dist/advisor.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist/advisor.js",
+    "README.md",
+    "README.vi.md",
+    "LICENSE",
+    "WATCHDOG.example.yml",
+    "scripts/install.sh"
+  ],
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "advisor",
+    "watchdog",
+    "code-review",
+    "agent"
+  ],
+  "engines": {
+    "opencode": ">=1.19"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/vocweb/opencode-advisor.git"
+  },
+  "homepage": "https://github.com/vocweb/opencode-advisor#readme",
+  "bugs": {
+    "url": "https://github.com/vocweb/opencode-advisor/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}
