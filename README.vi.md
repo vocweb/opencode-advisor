@@ -6,6 +6,8 @@ Sau mỗi bước của agent chính, advisor chỉ đọc phần mới của tr
 
 ## Cài đặt
 
+Plugin này cần opencode 1.19.x. Nó chưa nạp được trên opencode 2.x, vì bản 2.x yêu cầu định dạng plugin khác (một default export có `id`) và báo lỗi "Plugin must export a default definition". Kiểm tra phiên bản bằng `opencode --version`.
+
 Thêm package vào `opencode.json`, file global `~/.config/opencode/opencode.json` hoặc file trong project:
 
 ```json

@@ -6,6 +6,8 @@ After each step of the main agent, the advisor reads only the new part of the tr
 
 ## Install
 
+This plugin needs opencode 1.19.x. It does not load on opencode 2.x yet: 2.x expects a different plugin format (a default export with an `id`), and fails with "Plugin must export a default definition". Check your version with `opencode --version`.
+
 Add the package to `opencode.json`, either the global `~/.config/opencode/opencode.json` or one in your project:
 
 ```json
