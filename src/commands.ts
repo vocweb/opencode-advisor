@@ -258,7 +258,7 @@ function configure(ctx: CommandCtx, rest: string[]): string {
     const scope = (rest[1] ?? "project").toLowerCase()
     if (scope !== "project" && scope !== "user") return "Usage: `/advisor configure init [project|user]`."
     const file = scope === "user" ? userFile : project
-    const r = createTemplate(file)
+    const r = createTemplate(file, file === userFile)
     return r.ok ? `Created \`${r.file}\`. Edit it, then restart opencode. Use \`/advisor enable|disable <name>\` and \`/advisor setup <model>\` for live changes.` : r.error
   }
   const lines = [
@@ -283,7 +283,7 @@ function setEnabled(ctx: CommandCtx, name: string, enabled: boolean): string {
   const spec = ctx.specs.find((s) => s.slug === slug)
   if (!spec) return `No advisor named "${name}". Known: ${ctx.specs.map((s) => s.name).join(", ")}.`
   if (!spec.file) return `"${spec.name}" is the built-in default advisor and is not listed in any WATCHDOG.yml; there is no entry to ${verb}.`
-  const r = setAdvisorEnabled(spec.file, spec.name, enabled)
+  const r = setAdvisorEnabled(spec.file, spec.name, enabled, path.dirname(spec.file) === path.resolve(globalConfigDir(ctx.env)))
   if (!r.ok) return r.error
   spec.enabled = enabled
   ctx.applyEnabled(spec)
@@ -293,7 +293,7 @@ function setEnabled(ctx: CommandCtx, name: string, enabled: boolean): string {
 function setup(ctx: CommandCtx, model: string | undefined): string {
   if (!model) return "Usage: `/advisor setup <provider/model[:level]>` (or `inherit` to use the primary's model). Example: `/advisor setup anthropic/claude-haiku-4-5`."
   if (model !== "inherit" && !parseModelSelector(model)) return `Setup failed: "${model}" is not "provider/model" (or "inherit").`
-  const w = setModelRole(globalWatchdogFile(ctx.env), model)
+  const w = setModelRole(globalWatchdogFile(ctx.env), model, true)
   if (!w.ok) return `Setup failed: ${w.error}`
   // 旧既定モデルを継承していたエントリだけ新モデルに追従し、個別指定は保つ。
   // Chỉ entry kế thừa model mặc định cũ mới đổi theo; entry có model riêng giữ nguyên.

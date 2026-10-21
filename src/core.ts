@@ -273,7 +273,7 @@ export class AdvisorCore {
     const waiting = rts.filter((r) => r.spec.syncBacklog !== "off")
     if (waiting.length === 0) return
     await Promise.all(waiting.map((r) => r.waitCaughtUp(r.spec.syncBacklog, this.delivery.abortSignal(id))))
-    await this.delivery.flushNow(id)
+    await this.delivery.flushNow(id, true)
   }
 
   /** Non-interrupting notes waiting for the next model call, rendered as one block; undefined when there are none. */

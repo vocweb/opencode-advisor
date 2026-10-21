@@ -226,14 +226,16 @@ export class Delivery {
 
   // syncBacklog の待ちが明けた直後に、そのセッションのキューを配送する。待ちの意味は「次の呼び出し前にノートが届いている」ことだから。
   // Giao ngay hàng đợi của session sau khi hết chờ syncBacklog; ý nghĩa của việc chờ là note đã tới nơi trước lần gọi kế tiếp.
-  async flushNow(primaryID: string): Promise<void> {
+  async flushNow(primaryID: string, inline = false): Promise<void> {
     const s = this.st(primaryID)
     if (s.timer) clearTimeout(s.timer)
     s.timer = undefined
-    await this.flush(primaryID).catch((e) => this.log("warn", "advisory delivery failed", { error: errMessage(e), session: primaryID }))
+    await this.flush(primaryID, inline).catch((e) => this.log("warn", "advisory delivery failed", { error: errMessage(e), session: primaryID }))
   }
 
-  private async flush(primaryID: string): Promise<void> {
+  // inline: モデル呼び出し前の hook の中で呼ばれたとき true。steer-inject を host に投稿せず、同じ hook で aside として今の request に入れる。
+  // inline: true khi gọi trong hook trước lần gọi model; steer-inject không post lên host mà đi vào aside để nằm ngay trong request hiện tại.
+  private async flush(primaryID: string, inline = false): Promise<void> {
     const s = this.st(primaryID)
     const items = s.pending.splice(0)
     if (items.length === 0) return
@@ -271,9 +273,11 @@ export class Delivery {
     s.steers++
     s.immuneLeft = this.cfg.immuneTurns
     for (const n of notes) this.toast(n)
-    const opts = { nowTurn: s.turns, guidance: this.takeGuidance(primaryID) }
-    if (route === "steer-inject") {
-      const posted = await this.host.deliver(primaryID, notes, "inject", opts)
+    const opts = () => ({ nowTurn: s.turns, guidance: this.takeGuidance(primaryID) })
+    if (route === "steer-inject" && inline) {
+      s.asides.push(...notes)
+    } else if (route === "steer-inject") {
+      const posted = await this.host.deliver(primaryID, notes, "inject", opts())
       // 実行が決定と投稿の間に終わっていないか、host が確認する (v1 のみ)。
       // Host kiểm tra run có kết thúc giữa lúc quyết định và lúc chèn không (chỉ v1).
       void this.host
@@ -282,12 +286,12 @@ export class Delivery {
     } else {
       s.wakeAt = Date.now()
       s.continuation = true
-      void this.host.deliver(primaryID, notes, "wake", opts).catch((e) => {
+      void this.host.deliver(primaryID, notes, "wake", opts()).catch((e) => {
         s.continuation = false
         this.log("warn", "advisor wake failed", { error: errMessage(e), session: primaryID })
       })
     }
-    this.log("info", `advisory delivered via ${route}`, { session: primaryID, severity: top.note.severity, count: notes.length })
+    this.log("info", `advisory delivered via ${route}${inline && route === "steer-inject" ? " (inline)" : ""}`, { session: primaryID, severity: top.note.severity, count: notes.length })
   }
 
   // ---- toast

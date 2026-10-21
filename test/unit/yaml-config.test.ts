@@ -84,7 +84,7 @@ test("config: a broken entry only costs that entry; invalid values name the entr
   assert.equal(by("Bad").reviewInterval, 1)
   assert.equal(by("Bad").reviewMode, "turn")
   assert.deepEqual(by("Bad").tools, DEFAULT_TOOLS, "no valid tool left -> defaults (as omp)")
-  assert.deepEqual(by("Mixed").tools, ["grep", "glob", "edit"])
+  assert.deepEqual(by("Mixed").tools, ["grep", "glob"], "a project file cannot grant edit; the read-only names are kept")
   assert.deepEqual(by("Silent").tools, [])
   for (const field of ["reviewInterval", "reviewMode", "syncBacklog"]) {
     assert.ok(c.warnings.some((w) => w.includes("advisors[Bad]") && w.includes(field)), field)
@@ -243,4 +243,42 @@ test("yamlio: writes refuse to follow a symlink and never leave a predictable te
   assert.equal(setModelRole(file, "a/b").ok, true)
   assert.equal(fs.readFileSync(victim, "utf8"), "KEEP", "a pre-planted <file>.tmp symlink is not followed either")
   assert.deepEqual(fs.readdirSync(dir).filter((f) => f.endsWith(".tmp") && f !== "WATCHDOG.yml.tmp"), [], "no stray temp file")
+})
+
+test("config: a project file can only grant read-only tools; the user-level file keeps write tools", () => {
+  const home = tmp()
+  const proj = path.join(home, "p")
+  write(path.join(proj, ".opencode/WATCHDOG.yml"), "advisors:\n  - {name: A, tools: [read, bash, edit]}\n  - {name: B, tools: [bash]}\n")
+  write(path.join(home, "xdg/opencode/WATCHDOG.yml"), "advisors:\n  - {name: G, tools: [read, bash]}\n")
+  const c = load(home, proj)
+  const by = (n: string) => c.advisors.find((a) => a.name === n)!
+  assert.deepEqual(by("A").tools, ["read"])
+  assert.deepEqual(by("B").tools, DEFAULT_TOOLS, "everything dropped: fall back to the default investigation tools")
+  assert.deepEqual(by("G").tools, ["read", "bash"])
+  assert.ok(c.warnings.some((w) => /advisors\[A\]\.tools: a project file cannot grant "bash"/.test(w)), c.warnings.join("\n"))
+})
+
+test("yamlio: through a symlink the user's own file is updated in place, a project file is refused", () => {
+  const dir = tmp()
+  const real = path.join(dir, "dotfiles/WATCHDOG.yml")
+  write(real, "# mine\n")
+  const link = path.join(dir, "config/WATCHDOG.yml")
+  fs.mkdirSync(path.dirname(link), { recursive: true })
+  fs.symlinkSync(real, link)
+  assert.equal(setModelRole(link, "a/b", true).ok, true)
+  assert.ok(fs.lstatSync(link).isSymbolicLink(), "the link is still a link")
+  assert.match(fs.readFileSync(real, "utf8"), /# mine[\s\S]*advisor: a\/b/)
+  assert.equal(setModelRole(link, "c/d", false).ok, false)
+  assert.match(fs.readFileSync(real, "utf8"), /advisor: a\/b/, "refused write left the target untouched")
+})
+
+test("config: @import checks the file name, not the parent directory name (credentials-service/ is a normal project dir)", () => {
+  const home = tmp()
+  const proj = path.join(home, "credentials-service")
+  write(path.join(proj, "rules.md"), "RULES_OK")
+  write(path.join(proj, "id_rsa"), "KEY_SECRET")
+  write(path.join(proj, "WATCHDOG.md"), "A @./rules.md\nB @./id_rsa\n")
+  const c = load(home, proj)
+  assert.match(c.watchdog, /A RULES_OK/)
+  assert.doesNotMatch(c.watchdog, /KEY_SECRET/)
 })

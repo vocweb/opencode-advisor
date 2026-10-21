@@ -15,10 +15,9 @@ test("advisorPermission: investigative tools never ask, writes follow the user's
   assert.equal((p.read as Record<string, string>)["*.env"], "deny", "secret files stay denied")
 })
 
-test("advisorPermission: only the tool's own rule is carried over; a blanket allow (YOLO) never lets a granted write tool run unasked", () => {
-  assert.equal(advisorPermission(spec(["edit"]), "allow").edit, "ask")
-  assert.equal(advisorPermission(spec(["edit"]), { "*": "allow" }).edit, "ask")
-  assert.equal(advisorPermission(spec(["edit"]), { edit: "allow" }).edit, "allow", "an explicit rule for that tool is the user's own decision")
+test("advisorPermission: a plain string rule, a '*' rule and a pattern map are carried over as the user wrote them (repo files cannot grant write tools, see config.ts)", () => {
+  assert.equal(advisorPermission(spec(["edit"]), "allow").edit, "allow")
+  assert.equal(advisorPermission(spec(["edit"]), { "*": "allow" }).edit, "allow")
   const bash = { "*": "ask", "git *": "allow" }
   assert.deepEqual(advisorPermission(spec(["bash"]), { bash }).bash, bash)
 })

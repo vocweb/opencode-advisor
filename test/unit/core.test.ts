@@ -82,7 +82,7 @@ test("redact: JSON/YAML-quoted keys, quoted values with spaces, pass/pwd names a
     ["sk_live_" + "a1B2c3D4e5F6g7H8", "a1B2c3D4e5F6"],
   ]
   for (const [input, secret] of hidden) assert.ok(!redact(input).includes(secret), `leaked: ${input} -> ${redact(input)}`)
-  for (const s of ['apiKey: "string"', "secret: $SECRET_VALUE_X", "tokens: number"]) assert.equal(redact(s), s)
+  for (const s of ['apiKey: "string"', "secret: $SECRET_VALUE_X", "tokens: number", 'passed: "all 12 checks ok"', 'bypass: "skip validation here"', 'compass: "north-by-northwest"']) assert.equal(redact(s), s)
 })
 
 test("redact: leaves ordinary code and prose alone", () => {

@@ -37,9 +37,9 @@ export function advisorRules(spec: AdvisorSpec, user: readonly V2Rule[] = []): V
       } else if (name === "grep" || name === "glob") {
         rules.push({ action: name, resource: "*", effect: "allow" })
       } else {
-        // "*" の規則 (YOLO の allow など) は写さない。ツール個別の規則だけを使い、無ければ ask にする。
-        // Không chép luật "*" (như allow kiểu YOLO); chỉ dùng luật riêng của tool, không có thì ask.
-        const own = user.filter((r) => r.action === name)
+        // 利用者の規則はツール個別のものも "*" のものも写す。リポジトリ側がツールを付与できないことは config.ts で保証する。
+        // Chép cả luật riêng của tool lẫn luật "*" của người dùng; việc repo không được cấp tool ghi đã được đảm bảo ở config.ts.
+        const own = user.filter((r) => r.action === name || r.action === "*")
         rules.push(...(own.length > 0 ? own.map((r) => ({ ...r, action: name })) : [{ action: name, resource: "*", effect: "ask" as const }]))
       }
     }

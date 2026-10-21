@@ -276,6 +276,8 @@ export function discoverWatchdogYaml(dirs: string[], globalDir: string): { file:
   return out
 }
 
+const READ_ONLY_TOOLS: Record<string, true> = { read: true, grep: true, glob: true }
+
 // omp のツール名から opencode のツール名への対応。無いものは opencode に相当物がない。
 // Ánh xạ tên tool omp sang opencode; tên không có nghĩa là opencode không có tool tương đương.
 const TOOL_MAP: Record<string, string> = {
@@ -497,7 +499,17 @@ function parseLayer(root: Obj, file: string, warnings: string[], home: string, c
           if (!Array.isArray(e.tools)) warnings.push(`${where}.tools must be a list; ignored`)
           else {
             const names = e.tools.filter((x): x is string => typeof x === "string" && x.trim() !== "").map((x) => x.trim().toLowerCase())
-            spec.tools = normalizeTools(names, where, warnings)
+            const granted = normalizeTools(names, where, warnings)
+            // プロジェクト側の設定ファイルは読み取り専用ツールしか付与できない。リポジトリが書き込み・実行ツールを勝手に付与するのを防ぐため。
+            // File cấu hình trong project chỉ được cấp tool chỉ đọc, để repo không tự cấp tool ghi/chạy lệnh cho advisor.
+            if (confine === undefined) spec.tools = granted
+            else {
+              const kept = granted.filter((t) => READ_ONLY_TOOLS[t] === true)
+              for (const t of granted) if (READ_ONLY_TOOLS[t] !== true) warnings.push(`${where}.tools: a project file cannot grant "${t}"; dropped (grant it in the user-level WATCHDOG.yml)`)
+              // 全て落ちた場合は advisor が調査手段を失わないよう既定に戻す ([] は利用者が明示した場合だけ)。
+              // Nếu bị loại hết thì quay về mặc định để advisor không mất công cụ điều tra; [] chỉ khi người dùng viết rõ.
+              spec.tools = kept.length === 0 && granted.length > 0 ? [...DEFAULT_TOOLS] : kept
+            }
           }
         }
         if (e.reviewMode !== undefined) {

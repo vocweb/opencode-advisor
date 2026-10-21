@@ -1,6 +1,7 @@
 // End-to-end suite: the built plugin (dist/advisor.js) running inside a real `opencode serve`,
 // talking to a scripted OpenAI-compatible mock LLM. Run `npm run build` first.
-import { createRunner, makeEnv, sleep, waitFor, textOf } from "./lib.mjs"
+import { stringify as yamlStringify } from "yaml"
+import { createRunner, makeEnv, sleep, waitFor, textOf, toWatchdog } from "./lib.mjs"
 
 const only = process.argv.slice(2) // optional scenario-name filters
 const R = createRunner()
@@ -970,7 +971,9 @@ await scenario("tools: a granted mutating tool follows the user's permission pol
   const path = await import("node:path")
   for (const policy of ["ask", "allow"]) {
     const env = await makeEnv({
-      advisor: { model: "mock/adv", immuneTurns: 0, reviewTimeoutMs: 60000, permissionTimeoutMs: 3000, advisors: [{ name: "Fixer", tools: ["read", "write"] }] },
+      // Tool ghi chỉ cấp được từ cấu hình cấp người dùng nên đặt trong WATCHDOG.yml global.
+      advisor: null,
+      globalFiles: { "WATCHDOG.yml": yamlStringify(toWatchdog({ model: "mock/adv", immuneTurns: 0, reviewTimeoutMs: 60000, permissionTimeoutMs: 3000, advisors: [{ name: "Fixer", tools: ["read", "write"] }] })) },
       extraConfig: policy === "allow" ? { permission: { edit: "allow" } } : {},
     })
     try {
@@ -1054,6 +1057,29 @@ await scenario("scrub: grep results from a secret file never reach the advisor m
     check("the advisor did get a grep result", seen.length > 0, seen)
     check("a match in a normal file is visible", /OK_MARKER/.test(seen), seen)
     check("a match in .env is not", !/LEAK_MARKER/.test(seen), seen)
+  } finally {
+    await env.stop()
+  }
+})
+
+await scenario("strict: a blocker found while the primary waits is in the primary's next LLM request too", async (check) => {
+  const env = await makeEnv({ advisor: { model: "mock/adv", immuneTurns: 0, reviewTimeoutMs: 30000, syncBacklog: "strict" } })
+  try {
+    env.st.mainDelay = 100
+    let sent = false
+    env.st.advisorPlan = (ctx, upd) => {
+      if (!sent && /STRICT_BLOCK/.test(upd)) {
+        sent = true
+        return { delayMs: 600, toolCalls: [adviseCall("BLOCKER_NOTE: the migration drops the table.", "blocker")] }
+      }
+      return { text: "No findings." }
+    }
+    const s = await env.newSession("strict-blocker")
+    await env.run(s.id, "RUN_STEPS:3 STRICT_BLOCK")
+    await env.settle(2500)
+    const reqs = env.mainReqs()
+    check("the primary made at least two requests", reqs.length >= 2, reqs.length)
+    check("the blocker is in request 2, not one request later", /BLOCKER_NOTE/.test(JSON.stringify(reqs[1]?.messages ?? [])), reqs.map((r) => /BLOCKER_NOTE/.test(JSON.stringify(r.messages))))
   } finally {
     await env.stop()
   }

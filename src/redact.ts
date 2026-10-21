@@ -31,7 +31,7 @@ const URL_CREDS = /(\b[a-z][a-z0-9+.-]*:\/\/)([^\s:@/]+):([^\s@/]+)@/gi
 // JSON/YAML のようにキーが引用符で囲まれる形、引用符付きで空白を含む値、pass/pwd 系のキー名にも対応する。
 // Hỗ trợ khóa nằm trong dấu nháy kiểu JSON/YAML, giá trị có nháy và chứa khoảng trắng, và các khóa kiểu pass/pwd.
 const KEY_VALUE =
-  /\b([A-Za-z0-9_.-]*(?:secret|token|passwd|password|pass|pwd|api[_-]?key|access[_-]?key|private[_-]?key|credential)[A-Za-z0-9_.-]*)(["']?)(\s*[:=]\s*)(?:(["'`])([^"'`\n]{8,})\4|([^\s"'`,;)}\]]{8,}))/gi
+  /\b([A-Za-z0-9_.-]*(?:secret|token|passwd|password|(?<![A-Za-z])(?:pass|pwd)(?![A-Za-z])|api[_-]?key|access[_-]?key|private[_-]?key|credential)[A-Za-z0-9_.-]*)(["']?)(\s*[:=]\s*)(?:(["'`])([^"'`\n]{8,})\4|([^\s"'`,;)}\]]{8,}))/gi
 
 const ENV_REFERENCE = /^(?:process\.env|os\.environ|env\.|getenv|config\.|settings\.|\$\{?|<)/i
 

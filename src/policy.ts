@@ -13,12 +13,12 @@ const globToRegExp = (g: string): RegExp => new RegExp(`^${g.replace(/[.+^${}()|
 const SECRET_RES = SECRET_GLOBS.map(globToRegExp)
 const SECRET_ALLOW_RES = SECRET_ALLOW_GLOBS.map(globToRegExp)
 
-// 秘密ファイルかどうか。設定の @import など、advisor の権限経路を通らない読み込みでも同じ基準を使うため。
-// File có phải bí mật không; dùng cùng tiêu chí cho các đường đọc không đi qua quyền của advisor, như @import trong cấu hình.
+// 秘密ファイルかどうか。設定の @import など、advisor の権限経路を通らない読み込みでも同じ基準を使う。親ディレクトリ名 (credentials-service/ など) は見ず、ファイル名だけで判定する。
+// File có phải bí mật không; dùng cùng tiêu chí cho đường đọc không qua quyền advisor (như @import). Chỉ xét tên file, không xét tên thư mục cha như credentials-service/.
 export function isSecretPath(file: string): boolean {
   const name = file.split(/[\\/]/).pop() ?? file
   if (SECRET_ALLOW_RES.some((re) => re.test(name))) return false
-  return SECRET_RES.some((re) => re.test(name) || re.test(file))
+  return SECRET_RES.some((re) => re.test(name))
 }
 
 export const EVICTED = "[output of an earlier review evicted]"

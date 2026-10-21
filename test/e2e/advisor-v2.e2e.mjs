@@ -1,5 +1,6 @@
 // End-to-end suite for opencode 2.x: the built plugin (dist/advisor.js) in a real `opencode serve` 2.x, against the scripted mock LLM.
 import fs from "node:fs"
+import { stringify as yamlStringify } from "yaml"
 import { createRunnerV2, DIST, makeEnvV2, sleep, toWatchdog, waitFor } from "./lib-v2.mjs"
 
 const only = process.argv.slice(2)
@@ -177,7 +178,10 @@ await scenario("tools: a granted write tool follows the user's policy (ask with 
   const path = await import("node:path")
   for (const policy of ["ask", "allow"]) {
     const env = await makeEnvV2({
-      advisor: { model: "mock/adv", immuneTurns: 0, reviewTimeoutMs: 60000, permissionTimeoutMs: 3000, advisors: [{ name: "Fixer", tools: ["read", "edit"] }] },
+      // 書き込みツールはユーザー層の設定でしか付与できないので、global の WATCHDOG.yml に置く。
+      // Tool ghi chỉ cấp được từ cấu hình cấp người dùng nên đặt trong WATCHDOG.yml global.
+      advisor: null,
+      globalFiles: { "WATCHDOG.yml": yamlStringify(toWatchdog({ model: "mock/adv", immuneTurns: 0, reviewTimeoutMs: 60000, permissionTimeoutMs: 3000, advisors: [{ name: "Fixer", tools: ["read", "edit"] }] })) },
       projectFiles: { ".env": "SECRET=1\n", "ok.txt": "fine\n" },
       extraConfig: policy === "allow" ? { permission: { edit: "allow" } } : {},
     })
@@ -682,6 +686,31 @@ await scenario("recursion: a session below an advisor session is never reviewed,
     await env.settle(2500)
     const kids = await env.children(sub.id)
     check("control: an ordinary subagent with the same opt-in is reviewed", kids.some((k) => String(k.title).startsWith("[advisor]")), kids.map((k) => k.title))
+  } finally {
+    await env.stop()
+  }
+})
+
+await scenario("strict: a blocker found while the primary waits is in the primary's next LLM request too", async (check) => {
+  const env = await makeEnvV2({ advisor: { model: "mock/adv", immuneTurns: 0, reviewTimeoutMs: 30000, syncBacklog: "strict" } })
+  try {
+    env.st.mainDelay = 100
+    let sent = false
+    env.st.advisorPlan = (ctx, upd) => {
+      if (!sent && /STRICT_BLOCK/.test(upd)) {
+        sent = true
+        return { delayMs: 600, toolCalls: [adviseCall("BLOCKER_NOTE: the migration drops the table.", "blocker")] }
+      }
+      return { text: "No findings." }
+    }
+    const s = await env.newSession("strict-blocker")
+    await env.run(s.id, "RUN_STEPS:3 STRICT_BLOCK")
+    await env.settle(2500)
+    const reqs = env.mainReqs()
+    check("the primary made at least two requests", reqs.length >= 2, reqs.length)
+    check("the blocker is in request 2, not one request later", /BLOCKER_NOTE/.test(JSON.stringify(reqs[1]?.messages ?? [])))
+    const delivered = reqs.filter((r) => /BLOCKER_NOTE/.test(JSON.stringify(r.messages))).length
+    check("and the note is not delivered twice (no extra inbox copy)", (await env.transcript(s.id)).filter((m) => m.type === "synthetic" && /BLOCKER_NOTE/.test(String(m.text ?? ""))).length === 0, delivered)
   } finally {
     await env.stop()
   }
