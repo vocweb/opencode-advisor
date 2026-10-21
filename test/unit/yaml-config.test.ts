@@ -282,3 +282,22 @@ test("config: @import checks the file name, not the parent directory name (crede
   assert.match(c.watchdog, /A RULES_OK/)
   assert.doesNotMatch(c.watchdog, /KEY_SECRET/)
 })
+
+test("config: omp tool aliases normalize in the user-level file; a project file cannot grant task, bash or edit", () => {
+  const home = tmp()
+  const proj = path.join(home, "p")
+  write(path.join(home, "xdg/opencode/WATCHDOG.yml"), "advisors:\n  - {name: G, tools: [search, find, write, ast_edit, task, bash]}\n")
+  write(path.join(proj, ".opencode/WATCHDOG.yml"), "advisors:\n  - {name: P, tools: [read, task, bash, edit]}\n")
+  const c = load(home, proj)
+  assert.deepEqual(c.advisors.find((a) => a.name === "G")!.tools, ["grep", "glob", "edit", "task", "bash"])
+  assert.deepEqual(c.advisors.find((a) => a.name === "P")!.tools, ["read"])
+})
+
+test("yamlio: rewriting keeps the file's permission bits", () => {
+  const dir = tmp()
+  const file = path.join(dir, "WATCHDOG.yml")
+  write(file, "# x\n")
+  fs.chmodSync(file, 0o644)
+  assert.equal(setModelRole(file, "a/b").ok, true)
+  assert.equal(fs.statSync(file).mode & 0o777, 0o644)
+})
