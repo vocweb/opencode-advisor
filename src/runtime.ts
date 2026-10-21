@@ -180,6 +180,7 @@ export class AdvisorRuntime {
   /** Forget the advisor's context and failure state; the next review re-primes from the recent transcript. */
   reset(): void {
     this.needsReprime = true
+    this.retryAbort = undefined
     this.droppedCycles = 0
     this.quarantineStreak = 0
     this.lastError = undefined
@@ -197,6 +198,7 @@ export class AdvisorRuntime {
 
   dispose(): void {
     this.disposed = true
+    this.retryAbort = undefined
     this.abort?.abort()
     this.wake()
     const id = this.advisorSessionID
@@ -440,6 +442,9 @@ export class AdvisorRuntime {
 
   private async review(final: boolean): Promise<void> {
     const { client, cfg, registry, log, primaryID } = this.deps
+    // 前回の中断フラグが残らないように、毎回の review の先頭で消す。
+    // Xóa cờ ngắt của lần trước ở đầu mỗi review để nó không bị sót sang lần này.
+    this.retryAbort = undefined
     const msgs = await this.fetchMessages()
 
     const model = this.resolveModel(msgs)

@@ -26,9 +26,15 @@ function readPermission(): Record<string, string> {
 // Quyền của agent advisor: mặc định từ chối hết; chỉ cho advise và tool điều tra, tool ghi theo luật của người dùng (không có thì ask).
 export function advisorPermission(spec: AdvisorSpec, user?: unknown): Record<string, unknown> {
   const perm: Record<string, unknown> = { "*": "deny", advise: "allow" }
+  // 利用者の規則は ツール個別 → "*" の順に探す (個別の deny は "*" の allow に勝つ)。
+  // Luật của người dùng tra theo tool riêng rồi mới tới "*" (deny riêng thắng allow của "*").
   const userRule = (tool: string): unknown => {
     if (typeof user === "string") return user
-    if (user && typeof user === "object" && tool in user) return (user as Record<string, unknown>)[tool]
+    if (user && typeof user === "object") {
+      const rules = user as Record<string, unknown>
+      if (tool in rules) return rules[tool]
+      if ("*" in rules) return rules["*"]
+    }
     return undefined
   }
   for (const t of spec.tools) {
@@ -107,7 +113,14 @@ export async function createAdvisorHooks(input: PluginInput): Promise<Hooks> {
   const frontAdvisor = new Map<string, string>()
   // 拒否される予定の権限要求 (誰も答えなければ時間切れで reject)。
   // Các yêu cầu quyền đang chờ, sẽ bị từ chối nếu không ai trả lời.
-  const permissionTimers = new Map<string, NodeJS.Timeout>()
+  const permissionTimers = new Map<string, { timer: NodeJS.Timeout; sessionID: string }>()
+  function dropPermissionTimers(sessionID?: string): void {
+    for (const [id, e] of permissionTimers) {
+      if (sessionID !== undefined && e.sessionID !== sessionID) continue
+      clearTimeout(e.timer)
+      permissionTimers.delete(id)
+    }
+  }
 
   // ------------------------------------------------------------------ runtimes
 
@@ -218,6 +231,7 @@ export async function createAdvisorHooks(input: PluginInput): Promise<Hooks> {
       case "session.deleted": {
         const id = ev.properties.info.id
         disposeSession(id)
+        dropPermissionTimers(id)
         delivery.forget(id)
         registry.meta.delete(id)
         registry.fresh.delete(id)
@@ -240,20 +254,21 @@ export async function createAdvisorHooks(input: PluginInput): Promise<Hooks> {
         const id = String(p?.id ?? p?.requestID ?? "")
         if (!id || !registry.isAdvisorSession(p?.sessionID) || permissionTimers.has(id)) break
         const sessionID = String(p.sessionID)
-        permissionTimers.set(
-          id,
-          setTimeout(() => {
+        permissionTimers.set(id, {
+          sessionID,
+          timer: setTimeout(() => {
             permissionTimers.delete(id)
-            log("warn", "advisor permission request timed out; rejected", { sessionID, permission: id, title: p?.title })
-            if (cfg.toast) showToast(`An advisor asked for permission (${clip(String(p?.title ?? "tool"), 80)}) and nobody answered; it was rejected.`, "warning")
+            const what = `${String(p?.permission ?? "tool")} ${String(p?.patterns?.[0] ?? p?.title ?? "")}`.trim()
+            log("warn", "advisor permission request timed out; rejected", { sessionID, permission: id, what })
+            if (cfg.toast) showToast(`An advisor asked for permission (${clip(what, 80)}) and nobody answered; it was rejected.`, "warning")
             Promise.resolve(client.postSessionIdPermissionsPermissionId({ path: { id: sessionID, permissionID: id }, body: { response: "reject" } })).catch(() => {})
           }, cfg.permissionTimeoutMs),
-        )
+        })
         break
       }
       case "permission.replied": {
-        const id = String(ev.properties?.permissionID ?? ev.properties?.requestID ?? ev.properties?.id ?? "")
-        clearTimeout(permissionTimers.get(id))
+        const id = String(ev.properties?.requestID ?? ev.properties?.permissionID ?? ev.properties?.id ?? "")
+        clearTimeout(permissionTimers.get(id)?.timer)
         permissionTimers.delete(id)
         break
       }
@@ -467,6 +482,7 @@ export async function createAdvisorHooks(input: PluginInput): Promise<Hooks> {
     },
 
     dispose: async () => {
+      dropPermissionTimers()
       // 最後のレビューは最終回答の後に終わるので、今切るとヘッドレス実行で失われる。
       // Review cuối thường xong sau câu trả lời cuối nên cắt ngay sẽ mất ở chế độ headless.
       let cap: NodeJS.Timeout | undefined
