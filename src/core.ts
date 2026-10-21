@@ -1,5 +1,5 @@
 import { control, type CommandCtx } from "./commands.ts"
-import type { AdvisorConfig, AdvisorSpec } from "./config.ts"
+import { configSignature, loadConfig, type AdvisorConfig, type AdvisorSpec } from "./config.ts"
 import { Delivery } from "./delivery.ts"
 import type { Host } from "./host.ts"
 import type { LoopVerdict } from "./loopguard.ts"
@@ -7,6 +7,7 @@ import { agentNameFor } from "./policy.ts"
 import { renderAdvisories } from "./prompts.ts"
 import { resolveServiceTier } from "./tier.ts"
 import { Registry } from "./registry.ts"
+import { applyConfig, type ReloadResult } from "./reload.ts"
 import { AdvisorRuntime } from "./runtime.ts"
 import { SEVERITY_RANK, type Note } from "./types.ts"
 import { errMessage, parseModel } from "./util.ts"
@@ -55,6 +56,7 @@ export class AdvisorCore {
     this.specs = init.cfg.advisors
     this.delivery = new Delivery(init.host, init.cfg)
     this.setupNotice = !this.specs.some((s) => s.model)
+    this.signature = configSignature(this.loadOptions())
     this.commandCtx = {
       cfg: this.cfg,
       specs: this.specs,
@@ -69,7 +71,58 @@ export class AdvisorCore {
       runtimesFor: (id, create) => this.runtimesFor(id, create),
       disposeSession: (id) => this.disposeSession(id),
       applyEnabled: (spec) => this.applyEnabled(spec),
+      reload: () => this.reloadNow(),
     }
+  }
+
+  // ------------------------------------------------------------------ live reload
+
+  private signature: string
+
+  private loadOptions() {
+    return { directory: this.init.directory, ...(this.init.worktree !== undefined ? { worktree: this.init.worktree } : {}) }
+  }
+
+  /** Cheap check at every primary boundary: reload only when a configuration file changed. */
+  maybeReload(): void {
+    let sig: string
+    try {
+      sig = configSignature(this.loadOptions())
+    } catch {
+      return
+    }
+    if (sig === this.signature) return
+    try {
+      const r = this.reloadNow()
+      if (r.applied.length > 0 || r.restart.length > 0) this.log("info", "configuration reloaded", { applied: r.applied, restart: r.restart })
+    } catch (e) {
+      this.log("warn", "could not reload the configuration", { error: errMessage(e) })
+    }
+  }
+
+  /** Load the configuration again and apply it to the running advisors (no restart). */
+  reloadNow(): ReloadResult {
+    this.signature = configSignature(this.loadOptions())
+    const { result, added, toggled, remodeled, agentsStale } = applyConfig(this.cfg, this.specs, loadConfig(this.loadOptions()))
+    // agent 定義を作り直せない host (v1) では、新しい advisor の agent が無いので動かせない。roster から外して再起動が必要と伝える。
+    // Host không dựng lại được định nghĩa agent (v1) thì advisor mới chưa có agent nên chưa chạy được; bỏ khỏi roster và báo cần restart.
+    if (!this.host.refreshAgents) {
+      for (const spec of added.splice(0)) {
+        this.specs.splice(this.specs.indexOf(spec), 1)
+        result.applied = result.applied.filter((a) => a !== `added ${spec.name}`)
+        result.restart.push(`${spec.name}: new advisor`)
+      }
+    }
+    for (const spec of [...added, ...toggled]) this.applyEnabled(spec)
+    // model が変わった runtime は、前の model の失敗や冷却を引きずらないよう作り直す。
+    // Runtime có model đổi thì reset để không mang theo lỗi và cooldown của model cũ.
+    for (const list of this.runtimes.values()) for (const r of list) if (remodeled.some((s) => s.slug === r.spec.slug)) r.reset()
+    // agent 定義 (tool、instructions) は host が対応できるときだけ即座に更新する。
+    if (agentsStale && this.host.refreshAgents) {
+      void this.host.refreshAgents().catch((e) => this.log("warn", "could not refresh the advisor agents", { error: errMessage(e) }))
+      result.applied.push(...result.restart.splice(0).map((r) => `${r} (agents refreshed)`))
+    }
+    return result
   }
 
   private get log() {
@@ -293,6 +346,7 @@ export class AdvisorCore {
   // Giữ lần gọi LLM kế của primary tới khi advisor theo kịp; không bắt lệnh /advisor chờ vì đó là lối thoát khi advisor kẹt.
   async beforeModelCall(id: string, opts: { isControl: boolean }): Promise<void> {
     if (this.disabledSessions.has(id) || opts.isControl) return
+    this.maybeReload()
     const rts = this.runtimes.get(id) ?? []
     const waiting = rts.filter((r) => r.spec.syncBacklog !== "off")
     if (waiting.length === 0) return

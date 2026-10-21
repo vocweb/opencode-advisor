@@ -56,10 +56,14 @@ Muốn plugin không tạo file ban đầu, đặt `OPENCODE_ADVISOR_NO_SETUP=1`
 | `configure init [project\|user]` | Tạo file mẫu có chú thích (mặc định `project`). Không bao giờ ghi đè |
 | `enable <name>` / `disable <name>` | Sửa `enabled` của entry trong file chứa nó, giữ nguyên comment, và áp dụng ngay |
 | `setup <provider/model[:level]>` | Ghi `modelRoles.advisor` vào `WATCHDOG.yml` của user, giữ nguyên comment. Có hiệu lực ngay |
+| `model <name> <provider/model[:level]\|inherit>` | Đặt `model` của một entry trong roster ngay trong file chứa nó, giữ nguyên comment, và áp dụng ngay |
+| `reload` | Đọc lại mọi `WATCHDOG.yml` ngay. Việc này cũng tự xảy ra trước lần gọi model kế tiếp khi có file thay đổi |
 | `reset` | Bắt đầu ngữ cảnh advisor mới và gỡ `halted`, `quota_paused` |
 | `pause` / `resume` / `inbox` | Tạm giữ review, tiếp tục review, hoặc liệt kê các note đã giao |
 
-Trong oh-my-pi, `/advisor configure` là một TUI editor. Ở đây nó in ra text, và bạn đổi cấu hình bằng `enable`, `disable`, `setup`. Các thay đổi khác (tools, instructions, nhịp review, retry) cần khởi động lại opencode.
+Trong oh-my-pi, `/advisor configure` là một TUI editor. Ở đây `/advisor configure` in ra text. Trên opencode 2.x gói còn kèm một plugin TUI (`./tui`, tự được nạp cùng plugin server) thêm lệnh `/advisor-config`: menu gồm status, dump, reload, bật/tắt, đặt model và tạo file mẫu, cùng một toast cho mỗi advisory (`blocker` hiện như lỗi) và cho các cảnh báo của advisor. Đặt option `toast: false` của plugin để tắt toast.
+
+**Tải lại trực tiếp.** Sửa bất kỳ `WATCHDOG.yml` nào đều có hiệu lực trước lần gọi model kế tiếp, không cần khởi động lại: nhịp review, retry, fallback chain, model, instructions và `enabled`. Trên opencode 2.x, advisor mới, tools và quyền cũng được áp dụng vì plugin dựng lại các agent. Trên opencode 1.x, advisor mới trong file và thay đổi `tools` hoặc quyền cần khởi động lại; `/advisor reload` và `/advisor status` sẽ báo. Nếu opencode khởi động lại mà session vẫn còn session con `[advisor] <name>`, advisor tiếp tục trong đó thay vì bắt đầu lại (chỉ kiểm chứng trên 1.x).
 
 ## Cấu hình: `WATCHDOG.yml`
 
@@ -124,11 +128,11 @@ Một số tùy chọn của oh-my-pi không có tương đương trong opencode
 
 ## Giới hạn đã biết
 
-- Thay đổi cấu hình ngoài `/advisor setup`, `enable` và `disable` cần khởi động lại opencode.
+- Trên opencode 1.x, advisor mới và thay đổi `tools` hoặc quyền cần khởi động lại opencode (xem Tải lại trực tiếp). Mọi thứ khác trong `WATCHDOG.yml` áp dụng trực tiếp.
 - `syncBacklog` chỉ giữ được agent chính trước lần gọi LLM kế tiếp, không giữ được trước khi nó trả câu trả lời cuối. Với `agent-end` và `strict`, review chạy sau câu trả lời cuối, rồi note từ mức `continueSeverity` trở lên mới đánh thức agent.
 - Khi thoát, plugin chờ tối đa 15 giây cho các review đang chạy, nhưng opencode 1.19.3 không await `dispose` của plugin. Với `opencode run`, tiến trình thoát khoảng 15 ms sau khi `dispose` bắt đầu, nên review cuối của lần chạy headless bị mất. `opencode serve` nhận SIGTERM thì không gọi `dispose`.
-- opencode 1.x: viết cho API plugin 1.19.x và dùng các hook `experimental.*` có thể thay đổi. Toast TUI chưa được kiểm thử tự động.
-- opencode 2.x: advisory được chuyển bằng message synthetic, nên không có toast và câu trả lời của `/advisor` hiện trong transcript. Nếu model của advisor chưa có trong danh mục, advisor chờ ở trạng thái `no_model`, giữ batch và thử lại sau 30 giây ở một ranh giới sau đó; nó không bị halt. Advisor có ngữ cảnh vượt `contextTokenBudget` được tóm tắt và giữ nguyên session trên opencode 1.x, còn trên 2.x thì được dựng lại trong session mới. Frontmatter `advisor:` trong file agent không đọc được qua API plugin 2.x, hãy dùng `task.agentAdvisor` trong `WATCHDOG.yml`. `/advisor` không dùng được trong `opencode run` headless. Nếu opencode sau này đổi tên một hook mà plugin dùng, tính năng đó bị bỏ qua kèm một dòng log thay vì làm hỏng việc nạp plugin. Mọi thứ được kiểm thử với `opencode serve` thật trên cả hai dòng.
+- opencode 1.x: viết cho API plugin 1.19.x và dùng các hook `experimental.*` có thể thay đổi. Trên 1.x, advisory dùng toast của chính opencode; toast chưa được kiểm thử tự động.
+- opencode 2.x: advisory được chuyển bằng message synthetic và câu trả lời của `/advisor` hiện trong transcript. API plugin server không có toast, nên toast đến từ plugin TUI đi kèm (có unit test với context TUI giả, chưa chạy trong TUI thật). Nếu model của advisor chưa có trong danh mục, advisor chờ ở trạng thái `no_model`, giữ batch và thử lại sau 30 giây ở một ranh giới sau đó; nó không bị halt. Advisor có ngữ cảnh vượt `contextTokenBudget` được tóm tắt và giữ nguyên session trên opencode 1.x, còn trên 2.x thì được dựng lại trong session mới. Frontmatter `advisor:` trong file agent không đọc được qua API plugin 2.x, hãy dùng `task.agentAdvisor` trong `WATCHDOG.yml`. `/advisor` không dùng được trong `opencode run` headless. Nếu opencode sau này đổi tên một hook mà plugin dùng, tính năng đó bị bỏ qua kèm một dòng log thay vì làm hỏng việc nạp plugin. Mọi thứ được kiểm thử với `opencode serve` thật trên cả hai dòng.
 - Agent tự định nghĩa với `"*": "allow"` sẽ thấy tool `advise`. Các lần gọi của nó bị từ chối.
 
 ## Phát triển

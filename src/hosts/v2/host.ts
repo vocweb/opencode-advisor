@@ -1,7 +1,7 @@
 import type { Plugin } from "@opencode/plugin"
 import type { AdvisorChild, DeliverMode, DeliverOptions, Host, Logger, PromptInput, PromptResult } from "../../host.ts"
 import { renderAdvisories } from "../../prompts.ts"
-import { ADVISOR_TITLE_PREFIX, SELF_MARK, type Msg, type Note } from "../../types.ts"
+import { ADVISOR_TITLE_PREFIX, SELF_MARK, SEVERITY_RANK, type Msg, type Note } from "../../types.ts"
 import { lastAssistant, normalizeTranscript } from "./normalize.ts"
 
 // 型は @opencode/plugin のものを使う (型だけの import で、実行時には読み込まない)。API が変わると tsc が検出する。
@@ -14,6 +14,8 @@ export type LooseCtx = Record<string, any>
 
 // host に提供される toast API は無い。TUI プラグインが入るまでは log だけにする。
 // Server plugin v2 không có API toast; tới khi có plugin TUI thì chỉ ghi log.
+const topSeverity = (notes: Note[]): string => notes.reduce((a, n) => (SEVERITY_RANK[n.severity] > SEVERITY_RANK[a] ? n.severity : a), "nit" as Note["severity"])
+
 export function createV2Host(ctx: V2Ctx, log: Logger): Host {
   const session = ctx.session
   // advisor session ごとに、最後に設定した agent と model を覚えて無駄な切替を避ける。
@@ -100,6 +102,10 @@ export function createV2Host(ctx: V2Ctx, log: Logger): Host {
       return { id: a?.id, cost: a?.cost, tokens: a?.tokens }
     },
 
+    async refreshAgents() {
+      await ctx.agent.reload()
+    },
+
     async modelAvailable(model) {
       try {
         const list = (await ctx.model.list()) as unknown as { providerID?: string; id?: string }[]
@@ -132,13 +138,21 @@ export function createV2Host(ctx: V2Ctx, log: Logger): Host {
         ...(mode === "card" ? { description: text } : {}),
         resume: mode !== "card",
         delivery: "steer",
-        metadata: { [SELF_MARK]: true },
+        // TUI プラグインが toast を出せるよう、重大度と advisor 名を持たせる。
+        // Mang theo mức nghiêm trọng và tên advisor để plugin TUI hiện được toast.
+        metadata: { [SELF_MARK]: true, severity: topSeverity(notes), advisors: [...new Set(notes.map((n) => n.advisor))], count: notes.length },
       })) as { id?: string } | undefined
       return sent?.id
     },
 
-    toast(message, variant) {
+    // server plugin には toast API が無い。警告とエラーは、その session に短い card として残し、TUI プラグインがあれば toast にする。
+    // Server plugin không có API toast; cảnh báo và lỗi được để lại như một card ngắn trong session đó, và plugin TUI (nếu có) sẽ hiện thành toast.
+    toast(message, variant, _title, sessionID) {
       log(variant === "error" ? "error" : "info", `toast: ${message}`)
+      if (!sessionID || variant === "info") return
+      void Promise.resolve(
+        session.synthetic({ sessionID, text: "[opencode-advisor] notice", description: message, resume: false, delivery: "steer", metadata: { [SELF_MARK]: "notice", variant } }),
+      ).catch(() => {})
     },
   }
 }

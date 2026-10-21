@@ -556,6 +556,30 @@ function parseLayer(root: Obj, file: string, warnings: string[], home: string, c
   return layer
 }
 
+/**
+ * A cheap fingerprint (path, mtime, size) of every file a configuration could come from, existing or not.
+ * A change means the configuration must be loaded again; a new file shows up as a new entry.
+ */
+export function configSignature(opts: LoadOptions): string {
+  const env = opts.env ?? process.env
+  const home = opts.home ?? os.homedir()
+  const gdir = globalConfigDir(env, home)
+  const files = [path.join(gdir, "WATCHDOG.yml"), path.join(gdir, "WATCHDOG.yaml"), path.join(gdir, "WATCHDOG.md")]
+  for (const d of ancestorDirs(opts.directory, opts.worktree, home)) {
+    for (const base of [d, path.join(d, ".opencode")]) files.push(path.join(base, "WATCHDOG.yml"), path.join(base, "WATCHDOG.yaml"), path.join(base, "WATCHDOG.md"))
+  }
+  return files
+    .map((f) => {
+      try {
+        const st = fs.statSync(f)
+        return `${f}:${st.mtimeMs}:${st.size}`
+      } catch {
+        return `${f}:-`
+      }
+    })
+    .join("|")
+}
+
 export interface LoadOptions {
   directory: string
   worktree?: string

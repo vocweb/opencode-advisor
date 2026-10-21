@@ -59,9 +59,9 @@ export function setModelRole(file: string, model: string, allowSymlink = false):
   }
 }
 
-// 名前の slug が一致する roster エントリの enabled だけを書き換える。
-// Chỉ sửa enabled của entry roster có slug tên trùng khớp.
-export function setAdvisorEnabled(file: string, name: string, enabled: boolean, allowSymlink = false): IoResult {
+// 名前の slug が一致する roster エントリの 1 つのキーだけを書き換える。コメントや他のキーには触れない。
+// Chỉ sửa một khóa của entry roster có slug tên trùng khớp; không đụng comment hay các khóa khác.
+function setEntryField(file: string, name: string, key: "enabled" | "model", value: boolean | string, allowSymlink: boolean): IoResult {
   try {
     const o = openDoc(file)
     if ("error" in o) return { ok: false, error: o.error }
@@ -70,7 +70,7 @@ export function setAdvisorEnabled(file: string, name: string, enabled: boolean, 
     if (isSeq(list)) {
       for (const item of list.items) {
         if (isMap(item) && slugify(String(item.get("name") ?? "")) === slug) {
-          item.set("enabled", enabled)
+          item.set(key, value)
           writeAtomic(file, o.doc.toString({ lineWidth: 0, doubleQuotedAsJSON: true }), allowSymlink)
           return { ok: true, file }
         }
@@ -81,6 +81,10 @@ export function setAdvisorEnabled(file: string, name: string, enabled: boolean, 
     return { ok: false, error: errMessage(e) }
   }
 }
+
+export const setAdvisorEnabled = (file: string, name: string, enabled: boolean, allowSymlink = false): IoResult => setEntryField(file, name, "enabled", enabled, allowSymlink)
+
+export const setAdvisorModel = (file: string, name: string, model: string, allowSymlink = false): IoResult => setEntryField(file, name, "model", model, allowSymlink)
 
 // 注釈付きサンプルを作る。ユーザーの設定を壊さないため上書きしない。
 // Tạo file mẫu có chú thích; không bao giờ ghi đè để không phá cấu hình của người dùng.

@@ -43,6 +43,10 @@ export interface RuntimeStats {
 
 // バッチを破棄するまでの試行回数 (バックオフ付き)。
 // Số lần thử mỗi batch trước khi bỏ batch (có backoff).
+// "[advisor] Name #2" から advisor 名を取り出す。
+// Lấy tên advisor từ "[advisor] Name #2".
+const advisorTitleName = (title: string): string => title.slice(ADVISOR_TITLE_PREFIX.length).trim().replace(/ #\d+$/, "")
+
 const MAX_ATTEMPTS = 3
 // モデルが見つからないときの再試行間隔。カタログに後から現れる場合に備え、頻繁に叩かない。
 // Khoảng chờ trước khi thử lại khi chưa thấy model; phòng khi nó xuất hiện muộn trong danh mục nhưng cũng không gọi dồn dập.
@@ -511,6 +515,22 @@ export class AdvisorRuntime {
   private async ensureSession(): Promise<string> {
     if (this.advisorSessionID) return this.advisorSessionID
     const { host, registry, primaryID } = this.deps
+    // 再起動後に同じ primary を引き継いだときは、前回の advisor session を使い続ける。新しく作ると同名の子 session が増え、文脈と費用の記録も途切れる。
+    // Khi tiếp quản cùng một primary sau khi khởi động lại thì dùng tiếp session advisor cũ; tạo mới sẽ làm số session con trùng tên tăng lên và đứt mạch ngữ cảnh lẫn chi phí.
+    if (this.generation === 0 && !registry.fresh.has(primaryID)) {
+      const kids = await host.advisorChildren(primaryID).catch(() => [])
+      const last = kids.filter((k) => advisorTitleName(k.title) === this.spec.name).at(-1)
+      if (last) {
+        this.generation = Number(/ #(\d+)$/.exec(last.title)?.[1] ?? 1)
+        registry.advisorSessions.add(last.id)
+        registry.owners.set(last.id, this)
+        registry.meta.set(last.id, { parentID: primaryID, title: last.title })
+        this.advisorSessionID = last.id
+        this.sessionReviews = 1 // 履歴の長さは分からないので、予算超過の判定は次の review から
+        this.deps.log("info", "continuing the advisor session from before the restart", { advisor: this.spec.name, session: last.id })
+        return last.id
+      }
+    }
     this.generation++
     const title = `${ADVISOR_TITLE_PREFIX} ${this.spec.name}${this.generation > 1 ? ` #${this.generation}` : ""}`
     const id = await host.createAdvisorSession({ parentID: primaryID, title, name: this.spec.name, agent: this.deps.agentName })
@@ -684,6 +704,6 @@ export class AdvisorRuntime {
 
   private toast(message: string, variant: "info" | "warning" | "error"): void {
     if (!this.deps.cfg.toast) return
-    this.deps.host.toast(message, variant)
+    this.deps.host.toast(message, variant, undefined, this.deps.primaryID)
   }
 }

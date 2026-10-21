@@ -836,5 +836,39 @@ await scenario("no_model: a model missing from the catalog does not halt the adv
   }
 })
 
+await scenario("reload: editing WATCHDOG.yml takes effect at the next boundary without a restart, and /advisor reload applies it now", async (check) => {
+  const fs = await import("node:fs")
+  const path = await import("node:path")
+  const env = await makeEnvV2({ advisor: null, projectFiles: { ".opencode/WATCHDOG.yml": "modelRoles: {advisor: mock/adv}\nadvisor: {immuneTurns: 0, reviewTimeoutMs: 30000}\n" } })
+  try {
+    const file = path.join(env.oc.dir, ".opencode/WATCHDOG.yml")
+    const s = await env.newSession("reload")
+    await env.run(s.id, "one")
+    await env.settle()
+    check("the first review used adv", env.reviewStarts().length >= 1 && env.reviewStarts().every((r) => r.model === "adv"), env.reviewStarts().map((r) => r.model))
+    fs.writeFileSync(file, "modelRoles: {advisor: mock/alt}\nadvisor: {immuneTurns: 0, reviewTimeoutMs: 30000}\n")
+    const before = env.reviewStarts().length
+    await env.run(s.id, "two")
+    await env.settle()
+    const after = env.reviewStarts().slice(before).map((r) => r.model)
+    check("after the edit the next review used alt, with no restart", after.length >= 1 && after.every((r) => r === "alt"), after)
+    fs.writeFileSync(file, "modelRoles: {advisor: mock/adv}\nadvisor: {immuneTurns: 0, reviewTimeoutMs: 30000}\n")
+    const out = await env.command(s.id, "reload")
+    check("/advisor reload reports what changed", /Configuration reloaded/.test(out) && /model/.test(out), out)
+    const mark = env.reviewStarts().length
+    await env.run(s.id, "three")
+    await env.settle()
+    check("and the review after it used adv again", env.reviewStarts().slice(mark).every((r) => r.model === "adv") && env.reviewStarts().length > mark, env.reviewStarts().slice(mark).map((r) => r.model))
+    fs.writeFileSync(file, "modelRoles: {advisor: mock/adv}\nadvisor: {immuneTurns: 0, reviewTimeoutMs: 30000}\nadvisors:\n  - {name: Advisor}\n  - {name: Late}\n")
+    const m2 = env.reviewStarts().length
+    await env.run(s.id, "four")
+    await env.settle(2500)
+    const late = env.reviewStarts().slice(m2).filter((r) => r.system.includes('You are "Late"'))
+    check("an advisor added to the file starts reviewing (v2 rebuilds the agent definitions)", late.length >= 1, env.reviewStarts().slice(m2).map((r) => r.model))
+  } finally {
+    await env.stop()
+  }
+})
+
 process.exitCode = R.summary() ? 1 : 0
 process.exit(process.exitCode)

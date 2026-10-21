@@ -1215,5 +1215,62 @@ await scenario("no_model: a model missing from the catalog does not halt the adv
   }
 })
 
+await scenario("reload: editing WATCHDOG.yml takes effect at the next boundary without a restart, and /advisor reload applies it now", async (check) => {
+  const fs = await import("node:fs")
+  const path = await import("node:path")
+  const env = await makeEnv({ advisor: null, projectFiles: { ".opencode/WATCHDOG.yml": "modelRoles: {advisor: mock/adv}\nadvisor: {immuneTurns: 0, reviewTimeoutMs: 30000}\n" } })
+  try {
+    const file = path.join(env.oc.dir, ".opencode/WATCHDOG.yml")
+    const s = await env.newSession("reload")
+    await env.run(s.id, "one")
+    await env.settle()
+    check("the first review used adv", env.reviewStarts().length >= 1 && env.reviewStarts().every((r) => r.model === "adv"), env.reviewStarts().map((r) => r.model))
+    fs.writeFileSync(file, "modelRoles: {advisor: mock/alt}\nadvisor: {immuneTurns: 0, reviewTimeoutMs: 30000}\n")
+    const before = env.reviewStarts().length
+    await env.run(s.id, "two")
+    await env.settle()
+    const after = env.reviewStarts().slice(before).map((r) => r.model)
+    check("after the edit the next review used alt, with no restart", after.length >= 1 && after.every((r) => r === "alt"), after)
+    fs.writeFileSync(file, "modelRoles: {advisor: mock/adv}\nadvisor: {immuneTurns: 0, reviewTimeoutMs: 30000}\n")
+    const out = await env.command(s.id, "reload")
+    check("/advisor reload reports what changed", /Configuration reloaded/.test(out) && /model/.test(out), out)
+    const mark = env.reviewStarts().length
+    await env.run(s.id, "three")
+    await env.settle()
+    check("and the review after it used adv again", env.reviewStarts().slice(mark).every((r) => r.model === "adv") && env.reviewStarts().length > mark, env.reviewStarts().slice(mark).map((r) => r.model))
+    fs.writeFileSync(file, "modelRoles: {advisor: mock/adv}\nadvisor: {immuneTurns: 0, reviewTimeoutMs: 30000}\nadvisors:\n  - {name: Advisor}\n  - {name: Late}\n")
+    const rep = await env.command(s.id, "reload")
+    check("a brand-new advisor needs a restart on 1.x and says so (it is not started half-built)", /new advisor/.test(rep) && /restart/i.test(rep), rep)
+  } finally {
+    await env.stop()
+  }
+})
+
+await scenario("restart: after opencode restarts the advisor continues in its own session instead of opening a second one", async (check) => {
+  const env1 = await makeEnv({})
+  const root = env1.oc.root
+  let sid
+  try {
+    const s = await env1.newSession("long-lived")
+    sid = s.id
+    await env1.run(s.id, "BEFORE_RESTART")
+    await env1.settle()
+    check("a first advisor session exists", (await env1.children(s.id)).filter((k) => String(k.title).startsWith("[advisor]")).length === 1)
+  } finally {
+    await env1.stop()
+  }
+  const env2 = await makeEnv({ root })
+  try {
+    await env2.run(sid, "AFTER_RESTART")
+    await env2.settle()
+    const kids = (await env2.children(sid)).filter((k) => String(k.title).startsWith("[advisor]"))
+    check("still exactly one advisor session (it was reused)", kids.length === 1, kids.map((k) => k.title))
+    check("the new turn was reviewed", env2.st.advisorCalls.some((c) => /AFTER_RESTART/.test(c)))
+    check("without being told its context was reset", !env2.st.advisorCalls.some((c) => /context was reset/.test(c)))
+  } finally {
+    await env2.stop()
+  }
+})
+
 process.exitCode = R.summary() ? 1 : 0
 process.exit(process.exitCode)

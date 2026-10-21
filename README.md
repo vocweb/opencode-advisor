@@ -56,10 +56,14 @@ To stop the plugin from creating the starter file, set `OPENCODE_ADVISOR_NO_SETU
 | `configure init [project\|user]` | Creates a commented sample file (default `project`). Never overwrites |
 | `enable <name>` / `disable <name>` | Changes `enabled` for a roster entry in its file, keeping comments, and applies it immediately |
 | `setup <provider/model[:level]>` | Writes `modelRoles.advisor` to the user `WATCHDOG.yml`, keeping comments. Applies immediately |
+| `model <name> <provider/model[:level]\|inherit>` | Sets the `model` of one roster entry in its file, keeping comments, and applies it immediately |
+| `reload` | Re-reads every `WATCHDOG.yml` now. It also happens by itself before the next model call whenever a file changed |
 | `reset` | Starts a fresh advisor context and clears `halted` and `quota_paused` |
 | `pause` / `resume` / `inbox` | Hold reviews, continue them, or list the notes delivered so far |
 
-In oh-my-pi, `/advisor configure` is a TUI editor. Here it prints text, and you change things with `enable`, `disable` and `setup`. Other changes (tools, instructions, cadence, retry) need an opencode restart.
+In oh-my-pi, `/advisor configure` is a TUI editor. Here `/advisor configure` prints text. On opencode 2.x the package also ships a TUI plugin (`./tui`, loaded automatically beside the server plugin) that adds `/advisor-config`: a menu with status, dump, reload, enable/disable, set a model and create a sample file, and a toast for each advisory (`blocker` shows as an error) and for advisor warnings. Set the plugin option `toast: false` to silence the toasts.
+
+**Live reload.** Edits to any `WATCHDOG.yml` apply before the next model call, without a restart: cadence, retry, fallback chains, models, instructions and `enabled`. On opencode 2.x new advisors, tools and permissions apply too, because the plugin rebuilds the agents. On opencode 1.x an advisor that is new in the file, and tool or permission changes, need a restart; `/advisor reload` and `/advisor status` say so. If opencode restarts and the session still has an `[advisor] <name>` child, the advisor continues in it instead of starting over (verified on 1.x only).
 
 ## Configuration: `WATCHDOG.yml`
 
@@ -124,11 +128,11 @@ Some oh-my-pi options have no counterpart in opencode. They are accepted and ign
 
 ## Known limitations
 
-- Config changes other than `/advisor setup`, `enable` and `disable` need an opencode restart.
+- On opencode 1.x, new advisors and changes to `tools` or permissions need an opencode restart (see Live reload). Everything else in `WATCHDOG.yml` applies live.
 - `syncBacklog` can only hold the main agent before its next LLM call, not before it returns its last answer. With `agent-end` and `strict`, the review runs after the final answer, and a note at or above `continueSeverity` then wakes the agent.
 - On shutdown the plugin waits up to 15 seconds for running reviews, but opencode 1.19.3 does not await a plugin's `dispose`. With `opencode run` the process exits about 15 ms after `dispose` starts, so the last review of a headless run is lost. `opencode serve` on SIGTERM does not call `dispose` at all.
-- opencode 1.x: built against plugin API 1.19.x; it uses `experimental.*` hooks that may change. TUI toasts are not covered by the automated tests.
-- opencode 2.x: advisories are delivered as synthetic messages, so there are no toasts and `/advisor` replies appear in the transcript. If the advisor model is not in the catalog (yet), the advisor waits as `no_model`, keeps its batch and tries again after 30 seconds at a later boundary; it does not halt. An advisor whose context grows over `contextTokenBudget` is summarized and kept on opencode 1.x, but rebuilt in a fresh session on 2.x. Frontmatter `advisor:` on an agent file is not readable through the 2.x plugin API, so use `task.agentAdvisor` in `WATCHDOG.yml` instead (tested). `/advisor` is not available in headless `opencode run`. If a future opencode renames a hook the plugin uses, that feature is skipped with a log line instead of failing the load. Everything is tested against a real `opencode serve` on both lines.
+- opencode 1.x: built against plugin API 1.19.x; it uses `experimental.*` hooks that may change. On 1.x, advisories use opencode's own toasts; the toasts are not covered by the automated tests.
+- opencode 2.x: advisories are delivered as synthetic messages and `/advisor` replies appear in the transcript. The server plugin API has no toast, so toasts come from the bundled TUI plugin (covered by unit tests with a fake TUI context, not run in a real TUI). If the advisor model is not in the catalog (yet), the advisor waits as `no_model`, keeps its batch and tries again after 30 seconds at a later boundary; it does not halt. An advisor whose context grows over `contextTokenBudget` is summarized and kept on opencode 1.x, but rebuilt in a fresh session on 2.x. Frontmatter `advisor:` on an agent file is not readable through the 2.x plugin API, so use `task.agentAdvisor` in `WATCHDOG.yml` instead (tested). `/advisor` is not available in headless `opencode run`. If a future opencode renames a hook the plugin uses, that feature is skipped with a log line instead of failing the load. Everything is tested against a real `opencode serve` on both lines.
 - A custom agent with `"*": "allow"` can see the `advise` tool. Its calls are rejected.
 
 ## Development
