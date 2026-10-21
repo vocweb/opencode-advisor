@@ -574,7 +574,19 @@ export function loadConfig(opts: LoadOptions): AdvisorConfig {
       warnings.push(`${file}: expected a mapping; skipped`)
       continue
     }
-    layers.push(parseLayer(doc, file, warnings, home, path.dirname(file) === path.resolve(gdir) ? undefined : dirs[0]))
+    const isProject = path.dirname(file) !== path.resolve(gdir)
+    const layer = parseLayer(doc, file, warnings, home, isProject ? dirs[0] : undefined)
+    layers.push(layer)
+    if (isProject) {
+      // プロジェクトの設定が advisor のモデルを変えると、会話の内容が別の provider に送られる。気づけるよう必ず警告する。
+      // Cấu hình trong project mà đổi model của advisor thì nội dung hội thoại đi tới provider khác; luôn cảnh báo để người dùng biết.
+      const redirects = [
+        layer.modelRole ? `modelRoles.advisor=${layer.modelRole}` : "",
+        ...layer.advisors.filter((a) => a.model).map((a) => `advisors[${a.name}].model=${a.model}`),
+        Object.keys(layer.retry.fallbackChains ?? {}).length > 0 ? "retry.fallbackChains" : "",
+      ].filter(Boolean)
+      if (redirects.length > 0) warnings.push(`${file}: this project file chooses the advisor model (${redirects.join(", ")}); the session transcript will be sent to it. Only keep it if you trust this repository.`)
+    }
     sources.push(file)
   }
 

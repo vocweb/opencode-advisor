@@ -94,6 +94,8 @@ export class AdvisorRuntime {
   // Số update đã lên lịch mà chưa review xong, dùng làm điều kiện chờ của syncBacklog.
   private backlog = 0
   private waiters = new Set<() => void>()
+  private holding = 0
+  private holdingSince: number | undefined
   private running: Promise<void> | undefined
   private paused = false
   private disposed = false
@@ -217,21 +219,34 @@ export class AdvisorRuntime {
     const threshold = policy === "strict" ? 1 : policy
     const deadline = policy === "strict" ? Infinity : Date.now() + SYNC_WAIT_CAP_MS
     const stuck = () => this.disposed || this.dormant || this.paused || this.status === "failed" || this.status === "quota_paused" || this.status === "no_model" || this.status === "paused"
-    while (this.backlog >= threshold && !stuck() && !signal.aborted) {
-      const left = deadline - Date.now()
-      if (left <= 0) return
-      await new Promise<void>((resolve) => {
-        const done = () => {
-          clearTimeout(timer)
-          this.waiters.delete(done)
-          signal.removeEventListener("abort", done)
-          resolve()
-        }
-        const timer = setTimeout(done, Math.min(left, 2 ** 30))
-        this.waiters.add(done)
-        signal.addEventListener("abort", done, { once: true })
-      })
+    // /advisor status が「primary はこの advisor を待っている」と言えるよう、待ち始めの時刻を持つ。
+    // Giữ thời điểm bắt đầu chờ để /advisor status báo được primary đang chờ advisor này.
+    this.holding++
+    this.holdingSince ??= Date.now()
+    try {
+      while (this.backlog >= threshold && !stuck() && !signal.aborted) {
+        const left = deadline - Date.now()
+        if (left <= 0) return
+        await new Promise<void>((resolve) => {
+          const done = () => {
+            clearTimeout(timer)
+            this.waiters.delete(done)
+            signal.removeEventListener("abort", done)
+            resolve()
+          }
+          const timer = setTimeout(done, Math.min(left, 2 ** 30))
+          this.waiters.add(done)
+          signal.addEventListener("abort", done, { once: true })
+        })
+      }
+    } finally {
+      if (--this.holding === 0) this.holdingSince = undefined
     }
+  }
+
+  /** Milliseconds the primary has been held back by this advisor, or undefined when it is not waiting. */
+  heldForMs(): number | undefined {
+    return this.holdingSince === undefined ? undefined : Date.now() - this.holdingSince
   }
 
   // opencode は 429/5xx を自分で再試行し続け、prompt が戻らない。待つ価値がなければここで中断して fallback に回す。

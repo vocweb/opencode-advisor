@@ -1,3 +1,5 @@
+import fs from "node:fs"
+import path from "node:path"
 import { COMMAND_DESCRIPTION } from "../../commands.ts"
 import { loadConfig } from "../../config.ts"
 import { AdvisorCore } from "../../core.ts"
@@ -49,14 +51,39 @@ function makeLogger(): Logger {
   }
 }
 
+// 同じ project を二重に読み込まないための目印。plugin の cleanup で外す。
+// Đánh dấu để không nạp hai lần cùng một project; được gỡ trong cleanup của plugin.
+const LOADED = new Set<string>()
+
+// symlink や大文字小文字の違いで同じ directory を別物と見なさないよう、実体のパスに揃えて比べる。
+// Quy về đường dẫn thật trước khi so sánh để symlink hay khác biệt hoa thường không làm hai directory giống nhau thành khác nhau.
+function normalizeDir(p: string): string {
+  try {
+    return fs.realpathSync.native(p)
+  } catch {
+    return path.resolve(p)
+  }
+}
+
 /** The plugin for opencode 2.x. Everything outside this module is shared with 1.x through AdvisorCore. */
 export async function setupV2(ctx: V2Ctx): Promise<(() => void) | void> {
   const log = makeLogger()
   const directory = String(ctx.location.directory)
-  const cfg = loadConfig({ directory, worktree: ctx.location.project?.directory ? String(ctx.location.project.directory) : undefined })
+  // 同じ directory に plugin が二重に読み込まれると review が二重になる。先に読み込まれた方だけを動かす。
+  // Nếu plugin bị nạp hai lần cho cùng một directory thì review sẽ chạy đôi; chỉ để bản nạp trước hoạt động.
+  const loadKey = normalizeDir(directory)
+  if (LOADED.has(loadKey)) {
+    log("warn", `the advisor is already loaded for ${directory} (listed twice in the plugin config?); ignoring the second load`)
+    return
+  }
+  LOADED.add(loadKey)
+  const worktree = ctx.location.project?.directory ? String(ctx.location.project.directory) : undefined
+  const sameDir = (d: string | undefined): boolean => d !== undefined && normalizeDir(d) === loadKey
+  const cfg = loadConfig({ directory, worktree })
   for (const w of cfg.warnings) log("warn", w)
   if (!cfg.enabled) {
     log("info", "advisor disabled by configuration")
+    LOADED.delete(loadKey)
     return
   }
   const version = String(ctx.app?.version ?? "unknown")
@@ -67,7 +94,7 @@ export async function setupV2(ctx: V2Ctx): Promise<(() => void) | void> {
   else if (starter.error) log("warn", `could not create starter config: ${starter.error}`)
 
   const host = createV2Host(ctx, log)
-  const core = new AdvisorCore({ host, cfg, directory, worktree: undefined })
+  const core = new AdvisorCore({ host, cfg, directory, worktree })
   const { registry, specs } = core
   const stop = new AbortController()
 
@@ -85,11 +112,11 @@ export async function setupV2(ctx: V2Ctx): Promise<(() => void) | void> {
       // Session lần đầu thấy có thể đã lỡ sự kiện tạo (plugin chỉ nạp khi project được dùng lần đầu); đăng ký luôn tại đây.
       const info = await host.sessionInfo(id)
       dir = dir ?? info.directory
-      if (dir === directory) core.sessionUpdated({ id, parentID: info.parentID, title: info.title })
+      if (sameDir(dir)) core.sessionUpdated({ id, parentID: info.parentID, title: info.title })
     } catch {
       if (dir === undefined) return false
     }
-    const ok = dir === directory
+    const ok = sameDir(dir)
     mine.set(id, ok)
     return ok
   }
@@ -200,7 +227,11 @@ export async function setupV2(ctx: V2Ctx): Promise<(() => void) | void> {
       // 直前の step が終わっていれば、イベントより先にここで通知して syncBacklog の待ちに間に合わせる。
       // Nếu step trước đã xong thì báo ngay tại đây, trước cả sự kiện, để syncBacklog kịp chờ.
       const lastAssistant = [...ev.messages].reverse().find((m: any) => m.role === "assistant")
-      if (lastAssistant?.id) stepEnded(sid, String(lastAssistant.id), lastAssistant.content?.some((c: any) => c?.type === "tool-call") ? "tool-calls" : "stop")
+      // hook の messages には finish が無い。tool 呼び出しで終わった step だけは確実に「途中」と言えるので、その場合だけ通知する。
+      // Message trong hook không có finish; chỉ step kết thúc bằng tool-call mới chắc chắn là đang giữa lượt nên chỉ báo trong trường hợp đó.
+      // abort/length/error で終わった step を stop と誤認したり、過去の run の最終 step を新しい run の途中として数えたりしないため。
+      // Tránh nhầm step bị abort/length/error là stop, hoặc đếm step cuối của run cũ như đang ở giữa run mới.
+      if (lastAssistant?.id && lastAssistant.content?.some((c: any) => c?.type === "tool-call")) stepEnded(sid, String(lastAssistant.id), "tool-calls")
       await core.beforeModelCall(sid, { isControl: false })
       if (core.disabledSessions.has(sid)) return
       if (cfg.explainToPrimary) ev.system.push({ type: "text", text: PRIMARY_EXPLAINER })
@@ -274,7 +305,7 @@ export async function setupV2(ctx: V2Ctx): Promise<(() => void) | void> {
     }
     switch (ev.type) {
       case "session.created": {
-        if (!id || dir !== directory) return
+        if (!id || !sameDir(dir)) return
         mine.set(id, true)
         core.sessionCreated({ id, parentID: d.parentID, title: d.title })
         return
@@ -340,6 +371,7 @@ export async function setupV2(ctx: V2Ctx): Promise<(() => void) | void> {
 
   log("info", "advisor ready", { host: "v2", version, advisors: specs.map((s) => ({ name: s.name, enabled: s.enabled, model: s.model ?? null, tools: s.tools })) })
   return () => {
+    LOADED.delete(loadKey)
     stop.abort()
     dropPermissionTimers()
     core.stop()

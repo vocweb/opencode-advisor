@@ -716,5 +716,23 @@ await scenario("strict: a blocker found while the primary waits is in the primar
   }
 })
 
+await scenario("strict: /advisor status says which advisor the primary is waiting for, while the wait is on", async (check) => {
+  const env = await makeEnvV2({ advisor: { model: "mock/adv", immuneTurns: 0, reviewTimeoutMs: 30000, syncBacklog: "strict" } })
+  try {
+    env.st.mainDelay = 100
+    env.st.advisorPlan = () => ({ delayMs: 3000, text: "No findings." })
+    const s = await env.newSession("waiting")
+    const run = env.run(s.id, "RUN_STEPS:2 go")
+    await waitFor(() => env.reviewStarts().length >= 1, { timeout: 8000, label: "review started" })
+    const st = await env.command(s.id, "status")
+    check("status names the advisor the primary waits for", /primary agent is waiting for: advisor/.test(st), st.slice(0, 400))
+    await run
+    await env.settle(2500)
+    check("after the wait the line is gone", !/primary agent is waiting/.test(await env.command(s.id, "status")))
+  } finally {
+    await env.stop()
+  }
+})
+
 process.exitCode = R.summary() ? 1 : 0
 process.exit(process.exitCode)

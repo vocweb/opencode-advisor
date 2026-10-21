@@ -180,7 +180,9 @@ test("yamlio: createTemplate never overwrites, and its output loads without warn
   assert.ok(createTemplate(f).ok)
   assert.equal(createTemplate(f).ok, false)
   const c = load(home, path.join(home, "p"))
-  assert.deepEqual(c.warnings, [])
+  // プロジェクトに置いたテンプレートが advisor のモデルを選ぶ旨の通知だけは出てよい。それ以外の警告は出ないこと。
+  // Template đặt trong project chỉ được phép kèm thông báo chọn model; ngoài ra không được có cảnh báo nào.
+  assert.deepEqual(c.warnings.filter((w) => !/chooses the advisor model/.test(w)), [])
   assert.deepEqual(c.advisors.map((a) => [a.name, a.enabled]), [["Security", true], ["Style", false]])
 })
 
@@ -300,4 +302,15 @@ test("yamlio: rewriting keeps the file's permission bits", () => {
   fs.chmodSync(file, 0o644)
   assert.equal(setModelRole(file, "a/b").ok, true)
   assert.equal(fs.statSync(file).mode & 0o777, 0o644)
+})
+
+test("config: a project file that picks the advisor model or fallback chain is flagged; the user-level file is not", () => {
+  const home = tmp()
+  const proj = path.join(home, "p")
+  write(path.join(home, "xdg/opencode/WATCHDOG.yml"), "modelRoles: {advisor: a/b}\nretry: {fallbackChains: {advisor: [c/d]}}\n")
+  assert.deepEqual(load(home, path.join(home, "none")).warnings.filter((w) => /chooses the advisor model/.test(w)), [])
+  write(path.join(proj, ".opencode/WATCHDOG.yml"), "modelRoles: {advisor: x/y}\nadvisors:\n  - {name: A, model: z/w}\nretry: {fallbackChains: {advisor: [q/r]}}\n")
+  const w = load(home, proj).warnings.filter((x) => /chooses the advisor model/.test(x))
+  assert.equal(w.length, 1)
+  assert.match(w[0]!, /modelRoles\.advisor=x\/y.*advisors\[A\]\.model=z\/w.*retry\.fallbackChains/)
 })

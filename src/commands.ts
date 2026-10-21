@@ -101,16 +101,12 @@ interface Usage {
 
 const advisorName = (title: string) => title.slice(ADVISOR_TITLE_PREFIX.length).trim().replace(/ #\d+$/, "")
 
-async function advisorChildren(ctx: CommandCtx, primaryID: string): Promise<AdvisorChild[]> {
-  return ctx.host.advisorChildren(primaryID)
-}
-
 // 子セッション全体から集計すれば、リセットや再起動をまたいでも合計が正しい。
 // Cộng dồn từ mọi session con của advisor để tổng không mất khi reset hoặc khởi động lại plugin.
 async function usageFromChildren(ctx: CommandCtx, primaryID: string): Promise<Map<string, Usage> | undefined> {
   try {
     const out = new Map<string, Usage>()
-    for (const child of await advisorChildren(ctx, primaryID)) {
+    for (const child of await ctx.host.advisorChildren(primaryID)) {
       const name = advisorName(child.title)
       const u = out.get(name) ?? { cost: 0, tokensIn: 0, tokensOut: 0, contextTokens: 0 }
       const msgs = await ctx.host.transcript(child.id)
@@ -167,6 +163,8 @@ export async function statusReport(ctx: CommandCtx, sessionID: string): Promise<
       `| ${spec.name} | ${stateOf(spec, r)} | ${model} | ${spec.reviewMode}/${spec.reviewInterval} | ${spec.syncBacklog} | ${s?.reviews ?? 0} | ${s ? `${s.notes.nit}/${s.notes.concern}/${s.notes.blocker}` : "0/0/0"} | ${s ? s.rejected + s.quarantined : 0} | ${u?.contextTokens ?? s?.contextTokens ?? 0} | ${u?.tokensIn ?? s?.tokensIn ?? 0}/${u?.tokensOut ?? s?.tokensOut ?? 0} | $${cost.toFixed(4)} | ${r?.pendingDeferred ?? 0} |`,
     )
   }
+  const held = list.flatMap((r) => (r.heldForMs() === undefined ? [] : [`${r.spec.name} (${Math.round(r.heldForMs()! / 1000)}s)`]))
+  if (held.length > 0) lines.push("", `⏳ The primary agent is waiting for: ${held.join(", ")}. \`/advisor reset\` or \`/advisor off\` releases it.`)
   for (const r of list) if (r.lastError) lines.push("", `- ${r.spec.name} last error: ${clip(r.lastError, 300)}`)
   if (list.length === 0 && on) lines.push("", "No review has run in this session yet.")
   if (!specs.some((sp) => sp.model)) lines.push("", "⚠ No advisor model is set. Run `/advisor setup <provider/model>`.")
@@ -215,7 +213,7 @@ function renderDumpMessage(m: Msg, raw: boolean): string[] {
 async function dump(ctx: CommandCtx, sessionID: string, raw: boolean): Promise<string> {
   let children: AdvisorChild[]
   try {
-    children = await advisorChildren(ctx, sessionID)
+    children = await ctx.host.advisorChildren(sessionID)
   } catch (e) {
     return `Could not list advisor sessions: ${e instanceof Error ? e.message : String(e)}`
   }

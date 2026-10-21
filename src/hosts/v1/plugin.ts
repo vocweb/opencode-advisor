@@ -43,6 +43,7 @@ export async function createV1Hooks(input: PluginInput): Promise<Hooks> {
   const core = new AdvisorCore({ host, cfg, directory: input.directory, worktree: input.worktree })
   const { registry, specs } = core
   const pendingControl = new Map<string, { text: string; at: number }>()
+  const countedSteps = new Set<string>()
   // 拒否される予定の権限要求 (誰も答えなければ時間切れで reject)。
   // Các yêu cầu quyền đang chờ, sẽ bị từ chối nếu không ai trả lời.
   const permissionTimers = new Map<string, { timer: NodeJS.Timeout; sessionID: string }>()
@@ -113,6 +114,11 @@ export async function createV1Hooks(input: PluginInput): Promise<Hooks> {
           break
         }
         if (!info.time?.completed) break
+        // opencode は完了後の assistant message に対しても message.updated を再送しうる。id ごとに 1 回だけ数える。
+        // opencode có thể gửi lại message.updated cho assistant đã hoàn tất; chỉ đếm mỗi id một lần.
+        if (countedSteps.has(info.id)) break
+        countedSteps.add(info.id)
+        if (countedSteps.size > 2000) countedSteps.delete(countedSteps.values().next().value as string)
         core.stepCompleted(info.sessionID, info.finish)
         break
       }
