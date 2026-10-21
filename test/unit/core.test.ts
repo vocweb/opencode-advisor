@@ -233,3 +233,9 @@ test("config: OPENCODE_ADVISOR=off disables; WATCHDOG.md @imports expand, skippi
   const e = expandImports("a @./more.md b", path.join(proj, "WATCHDOG.md"), new Set(), 0, home)
   assert.match(e, /MORE/)
 })
+
+test("model selector: `:auto` is a level word, so `provider/model:auto` splits into the model and the auto marker", () => {
+  assert.deepEqual(parseModelSelector("a/b:auto"), { ref: { providerID: "a", modelID: "b" }, level: "auto" })
+  assert.deepEqual(parseModelSelector("a/b:high")?.level, "high")
+  assert.equal(parseModelSelector("a/b:nonsense")?.level, undefined, "an unknown suffix stays part of the model id")
+})

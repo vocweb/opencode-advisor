@@ -557,17 +557,36 @@ await scenario("compaction: summarizing the primary resets the advisor", async (
   }
 })
 
-await scenario("budget: an advisor over its token budget is re-primed in a fresh session", async (check) => {
+const SUMMARY_REQUEST = /Here is the conversation so far/
+
+await scenario("budget: an advisor over its token budget is summarized and keeps its session", async (check) => {
   const env = await makeEnv({ advisor: { model: "mock/adv", immuneTurns: 0, reviewTimeoutMs: 30000, contextTokenBudget: 50000 } })
   try {
     env.st.advisorPlan = () => ({ text: "No findings.", promptTokens: 80000 })
     const s = await env.newSession("budget")
-    await env.run(s.id, "turn one")
-    await env.settle()
-    await env.run(s.id, "turn two")
-    await env.settle()
-    await env.run(s.id, "turn three")
-    await env.settle()
+    for (const t of ["turn one", "turn two", "turn three"]) {
+      await env.run(s.id, t)
+      await env.settle()
+    }
+    const kids = (await env.children(s.id)).filter((k) => k.title.startsWith("[advisor]"))
+    check("a summarize request was made to the advisor model", env.mock.requests.some((r) => r.model === "adv" && SUMMARY_REQUEST.test(JSON.stringify(r.messages.at(-1)))))
+    check("the advisor kept its session (no rebuild)", kids.length === 1, kids.map((k) => k.title))
+    check("it was not told its context was reset", !env.st.advisorCalls.some((c) => /context was reset/.test(c)))
+  } finally {
+    await env.stop()
+  }
+})
+
+await scenario("budget: when summarizing fails the advisor is re-primed in a fresh session", async (check) => {
+  const env = await makeEnv({ advisor: { model: "mock/adv", immuneTurns: 0, reviewTimeoutMs: 30000, contextTokenBudget: 50000 } })
+  try {
+    env.st.advisorPlan = () => ({ text: "No findings.", promptTokens: 80000 })
+    env.st.summarizePlan = () => ({ status: 400, body: "cannot summarize" })
+    const s = await env.newSession("budget2")
+    for (const t of ["turn one", "turn two", "turn three"]) {
+      await env.run(s.id, t)
+      await env.settle()
+    }
     const kids = (await env.children(s.id)).filter((k) => k.title.startsWith("[advisor]"))
     const R_ = env.reviewStarts().length
     check("re-primed after growing, but never per review (a session lives for >= 2 reviews)", kids.length >= 2 && kids.length <= Math.ceil(R_ / 2), [kids.length, R_])
@@ -1105,6 +1124,22 @@ await scenario("loop guard: an advisor repeating the same call is reminded on th
     const st = await env.command(s.id, "status")
     check("the advisor is not halted by it", !/halted|failed/.test(st), st.slice(0, 500))
     check("the primary was not affected", reply.parts.some((p) => p.type === "text"))
+  } finally {
+    await env.stop()
+  }
+})
+
+await scenario("level: a `:high` suffix on the advisor model is sent as the thinking level (variant) instead of being ignored", async (check) => {
+  const env = await makeEnv({ advisor: { model: "mock/adv:high", immuneTurns: 0, reviewTimeoutMs: 30000 } })
+  try {
+    const s = await env.newSession("level")
+    await env.run(s.id, "hello")
+    await env.settle()
+    check("the advisor reviewed", env.reviewStarts().length >= 1, env.reviewStarts().length)
+    const kids = (await env.children(s.id)).filter((k) => String(k.title).startsWith("[advisor]"))
+    const msgs = kids.length ? await env.transcript(kids[0].id) : []
+    const variants = msgs.map((m) => m.info.variant ?? m.info.model?.variant).filter(Boolean)
+    check("the advisor session's messages carry variant=high", variants.includes("high"), msgs.map((m) => JSON.stringify(m.info).slice(0, 160)))
   } finally {
     await env.stop()
   }

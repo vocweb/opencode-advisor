@@ -34,6 +34,8 @@ export interface RuntimeStats {
   tokensOut: number
   cost: number
   failures: number
+  /** Times the advisor session was summarized instead of rebuilt (over budget). */
+  compactions: number
   // 直近レビュー後の advisor 文脈の token 数 (status 表示用)。
   // Số token trong ngữ cảnh advisor sau review gần nhất (hiển thị ở status).
   contextTokens: number
@@ -78,6 +80,7 @@ export class AdvisorRuntime {
     tokensOut: 0,
     cost: 0,
     failures: 0,
+    compactions: 0,
     contextTokens: 0,
   }
   readonly chain: ModelChain
@@ -109,7 +112,6 @@ export class AdvisorRuntime {
   private droppedCycles = 0
   private quarantineStreak = 0
   private warnedNoModel = false
-  private warnedLevel = false
   private sessionReviews = 0
   /** No usable model configured: nothing to do until the configuration changes (needs a restart). */
   private dormant = false
@@ -118,6 +120,7 @@ export class AdvisorRuntime {
   private abort: AbortController | undefined
   private retryAbort: string | undefined
   private loopStopped = false
+  private overBudget = false
   private readonly guard: EmissionGuard
 
   constructor(private deps: RuntimeDeps) {
@@ -456,7 +459,18 @@ export class AdvisorRuntime {
       }
       return undefined
     }
-    return parseModelSelector(m)
+    const sel = parseModelSelector(m)
+    // ":auto" は primary が直近に使っていた思考レベルに合わせる。分からなければ指定なし (モデルの既定) にする。
+    // ":auto" theo mức suy luận primary vừa dùng; nếu không biết thì không chỉ định (dùng mặc định của model).
+    if (sel?.level === "auto") {
+      const { level: _auto, ...rest } = sel
+      for (let i = msgs.length - 1; i >= 0; i--) {
+        const v = msgs[i]!.info.variant
+        if (v) return { ...rest, level: v }
+      }
+      return rest
+    }
+    return sel
   }
 
   private async fetchMessages(): Promise<Msg[]> {
@@ -496,13 +510,18 @@ export class AdvisorRuntime {
       }
       return
     }
-    // SDK の prompt には思考レベル欄がないので、:level は捨てるしかない。
-    // Prompt của SDK không có trường mức suy luận nên chỉ có thể bỏ hậu tố :level.
-    if (model.level && !this.warnedLevel) {
-      this.warnedLevel = true
-      log("warn", `model level "${model.level}" ignored: unsupported by this opencode`, { advisor: this.spec.name })
+    // 予算超過だけが原因なら、まず今の session を要約して続ける (omp と同じ順序)。失敗したら作り直す。他の原因 (失敗後) は常に作り直す。
+    // Nếu chỉ vì vượt ngân sách thì thử tóm tắt chính session hiện tại trước (đúng thứ tự của omp); thất bại mới dựng lại. Nguyên nhân khác (sau lỗi) luôn dựng lại.
+    if (this.needsReprime && this.overBudget && this.advisorSessionID && host.compactAdvisor) {
+      this.overBudget = false
+      if (await host.compactAdvisor(this.advisorSessionID, model.ref)) {
+        this.needsReprime = false
+        this.sessionReviews = 0
+        this.stats.compactions++
+        log("info", "advisor session summarized instead of rebuilt", { advisor: this.spec.name })
+      }
     }
-
+    this.overBudget = false
     if (this.needsReprime) {
       this.needsReprime = false
       this.sessionReviews = 0
@@ -613,7 +632,8 @@ export class AdvisorRuntime {
     // A session whose very first review already exceeds the budget would just be re-created forever; only re-prime sessions that grew.
     if (ctxTokens > cfg.contextTokenBudget && this.sessionReviews >= 2) {
       this.needsReprime = true
-      log("info", "advisor context over budget; will re-prime", { advisor: this.spec.name, tokens: ctxTokens })
+      this.overBudget = true
+      log("info", "advisor context over budget; will summarize or re-prime", { advisor: this.spec.name, tokens: ctxTokens })
     }
 
     this.deliverNotes(ctx.notes, final)

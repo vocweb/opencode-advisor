@@ -88,7 +88,7 @@ export function createV1Host(client: V1Client, log: Logger): Host {
       const data = unwrap<{ info?: any }>(
         await client.session.prompt({
           path: { id: sessionID },
-          body: { agent: input.agent, model: input.model, parts: [{ type: "text", text: input.text }] },
+          body: { agent: input.agent, model: input.model, ...(input.level ? { variant: input.level } : {}), parts: [{ type: "text", text: input.text }] },
           signal: input.signal,
         } as any),
       )
@@ -105,6 +105,21 @@ export function createV1Host(client: V1Client, log: Logger): Host {
 
     async abort(id) {
       await client.session.abort({ path: { id } })
+    },
+
+    // 要約に失敗したら false を返し、呼び出し側が作り直す。要約はモデル呼び出しを伴うので、失敗しても例外にはしない。
+    // Tóm tắt thất bại thì trả false để bên gọi dựng lại session; việc tóm tắt cần gọi model nên không ném lỗi khi thất bại.
+    async compactAdvisor(id, model) {
+      try {
+        unwrap(await client.session.summarize({ path: { id }, body: { providerID: model.providerID, modelID: model.modelID } } as any))
+        // provider の失敗は HTTP エラーにならず、要約メッセージの error として残る。最新の要約メッセージが正常に完了したかを確かめる。
+        // Lỗi của provider không thành lỗi HTTP mà nằm trong error của message tóm tắt; phải kiểm tra message tóm tắt mới nhất có hoàn tất bình thường không.
+        const msgs = unwrap<{ info: { role: string; summary?: boolean; error?: unknown; time?: { completed?: number } } }[]>(await client.session.messages({ path: { id }, query: { limit: 6 } } as any))
+        const last = [...msgs].reverse().find((m) => m.info.role === "assistant" && m.info.summary)
+        return !!last && !last.info.error && !!last.info.time?.completed
+      } catch {
+        return false
+      }
     },
 
     async advisorChildren(primaryID): Promise<AdvisorChild[]> {

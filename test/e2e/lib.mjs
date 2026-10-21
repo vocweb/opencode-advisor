@@ -69,6 +69,9 @@ export async function makeEnv(opts = {}) {
       st.advisorCalls.push(upd)
       return st.advisorPlan(ctx, upd, st)
     }
+    // summarize 要求 (tool なし) を scenario が失敗させられるようにする。
+    // Cho phép scenario làm cho request tóm tắt (không có tool) thất bại.
+    if (ctx.tools.length === 0 && st.summarizePlan && /Here is the conversation so far/.test(JSON.stringify(ctx.messages.at(-1)))) return st.summarizePlan(ctx)
     if (ctx.tools.length === 0) return /title/i.test(ctx.system) ? { text: "T" } : { text: "ok" }
     return (st.mainPlan || defaultMainPlan)(ctx, st)
   }

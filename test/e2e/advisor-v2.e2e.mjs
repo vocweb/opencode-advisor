@@ -759,5 +759,35 @@ await scenario("loop guard: an advisor repeating the same call is reminded on th
   }
 })
 
+await scenario("level: a `:high` suffix on the advisor model is sent as the thinking level (variant) instead of being ignored", async (check) => {
+  const env = await makeEnvV2({ advisor: { model: "mock/adv:high", immuneTurns: 0, reviewTimeoutMs: 30000 } })
+  try {
+    const s = await env.newSession("level")
+    await env.run(s.id, "hello")
+    await env.settle()
+    check("the advisor reviewed", env.reviewStarts().length >= 1, env.reviewStarts().length)
+    const kids = (await env.children(s.id)).filter((k) => String(k.title).startsWith("[advisor]"))
+    const msgs = kids.length ? await env.transcript(kids[0].id) : []
+    const variants = msgs.map((m) => m.model?.variant).filter(Boolean)
+    check("the advisor session's assistant messages carry variant=high", variants.includes("high"), msgs.map((m) => JSON.stringify(m.model ?? m.type)))
+  } finally {
+    await env.stop()
+  }
+})
+
+await scenario("agents: the project's AGENTS.md reaches the advisor's system prompt", async (check) => {
+  const env = await makeEnvV2({ projectFiles: { "AGENTS.md": "PROJECT_RULE_MARKER: keep it small" } })
+  try {
+    const s = await env.newSession("agents")
+    await env.run(s.id, "hello")
+    await env.settle()
+    const adv = env.reviewStarts()[0]
+    check("the advisor reviewed", !!adv)
+    check("AGENTS.md is in its system prompt", /PROJECT_RULE_MARKER/.test(adv?.system ?? ""), adv?.system?.slice(0, 200))
+  } finally {
+    await env.stop()
+  }
+})
+
 process.exitCode = R.summary() ? 1 : 0
 process.exit(process.exitCode)

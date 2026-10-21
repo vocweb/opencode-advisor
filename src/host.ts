@@ -54,6 +54,11 @@ export interface Host {
   /** Run one advisor prompt to completion. Never throws for provider errors: they come back in `error`. */
   promptAdvisor(sessionID: string, input: PromptInput): Promise<PromptResult>
   abort(sessionID: string): Promise<void>
+  /**
+   * Ask the host to summarize an advisor session so it can keep going instead of being rebuilt.
+   * Returns false when the host cannot do it or it failed; the caller then re-primes. Absent on hosts without a usable summarize.
+   */
+  compactAdvisor?(sessionID: string, model: ModelRef): Promise<boolean>
   /** Sessions created for the advisors of `primaryID`, oldest first (for status/dump and restarts). */
   advisorChildren(primaryID: string): Promise<AdvisorChild[]>
 

@@ -27,6 +27,8 @@ export interface MsgInfo {
   /** assistant: the agent that produced it (v1 `mode`). */
   mode?: string
   model?: ModelRef
+  /** The thinking level (variant) this message was sent with, when the host reports it. */
+  variant?: string
   providerID?: string
   modelID?: string
   parentID?: string
