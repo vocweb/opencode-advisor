@@ -3,6 +3,8 @@ import os from "node:os"
 import path from "node:path"
 import { parse as parseYaml } from "yaml"
 import { SEVERITIES, type Severity } from "./types.ts"
+import { childRepositoryBlock } from "./childrepo.ts"
+import { isSecretPath } from "./policy.ts"
 import { slugify } from "./util.ts"
 
 export type SyncBacklog = "off" | 1 | 3 | 5 | "strict"
@@ -51,6 +53,8 @@ export interface AdvisorConfig {
   // Trần số lần ngắt mỗi prompt, chặn vòng lặp qua lại giữa advisor và agent.
   maxSteersPerPrompt: number
   syncBacklog: SyncBacklog
+  /** "none" (standard processing), "inherit" (follow the primary) or a concrete tier. */
+  serviceTier: string
   // 最終回答後はこの重大度以上だけが再起動させ、未満はカードにする。
   // Sau câu trả lời cuối chỉ note từ mức này mới đánh thức agent, thấp hơn thành card.
   continueSeverity: Severity
@@ -73,6 +77,9 @@ export interface AdvisorConfig {
   // Số batch bị bỏ liên tiếp đạt ngưỡng này thì advisor dừng.
   maxConsecutiveFailures: number
   toast: boolean
+  // 人間が答えない権限要求を拒否するまでの時間 (ms)。レビューが無期限に止まるのを防ぐ。
+  // Thời gian (ms) trước khi từ chối yêu cầu quyền không ai trả lời, tránh review kẹt vô hạn.
+  permissionTimeoutMs: number
   // 主エージェントの system prompt に advisory の説明を足すか。
   // Có thêm lời giải thích về advisory vào system prompt của primary hay không.
   explainToPrimary: boolean
@@ -107,8 +114,13 @@ export const DEFAULT_RETRY: RetryConfig = {
   fallbackChains: {},
 }
 
+// advisor の service tier として指定できる具体値。実際に付けるのは対応する provider だけ (README 参照)。
+// Các giá trị service tier cụ thể có thể chỉ định; chỉ áp cho provider có hỗ trợ (xem README).
+export const SERVICE_TIERS: Record<string, true> = { auto: true, default: true, flex: true, scale: true, priority: true, ultrafast: true }
+
 export const DEFAULTS = {
   enabled: true,
+  serviceTier: "none",
   maxNotesPerUpdate: 4,
   immuneTurns: 3,
   maxSteersPerPrompt: 6,
@@ -127,6 +139,7 @@ export const DEFAULTS = {
   reviewTimeoutMs: 300_000,
   maxConsecutiveFailures: 3,
   toast: true,
+  permissionTimeoutMs: 120_000,
   explainToPrimary: true,
 }
 
@@ -168,10 +181,23 @@ function readText(file: string, maxBytes = 200_000): string | undefined {
 
 // ---------------------------------------------------------------- WATCHDOG.md
 
+// 存在しないパスでも例外にせず、そのまま返す。存在しなければ後段の readText が失敗するので安全。
+// Đường dẫn không tồn tại thì trả nguyên, không ném lỗi; readText phía sau sẽ tự thất bại nên vẫn an toàn.
+function safeRealpath(p: string): string {
+  try {
+    return fs.realpathSync(p)
+  } catch {
+    return path.resolve(p)
+  }
+}
+
 const IMPORT_RE = /(^|\s)@((?:\.{1,2}\/|~\/)[^\s`]+)/g
 
-export function expandImports(text: string, file: string, seen: Set<string> = new Set(), depth = 0, home = os.homedir()): string {
+// confine 指定時は realpath が配下にある非秘密ファイルだけ import する。リポジトリの設定が ~/.aws/credentials 等を system prompt に取り込めないようにするため。
+// Khi có confine chỉ import file không bí mật có realpath nằm trong đó, để cấu hình trong repo không kéo được ~/.aws/credentials vào system prompt.
+export function expandImports(text: string, file: string, seen: Set<string> = new Set(), depth = 0, home = os.homedir(), confine?: string): string {
   if (depth > 5) return text
+  const root = confine === undefined ? undefined : safeRealpath(confine)
   const base = path.dirname(file)
   let fenced = false
   return text
@@ -191,10 +217,15 @@ export function expandImports(text: string, file: string, seen: Set<string> = ne
             : seg.replace(IMPORT_RE, (m, lead: string, p: string) => {
                 const resolved = p.startsWith("~/") ? path.join(home, p.slice(2)) : path.resolve(base, p)
                 if (seen.has(resolved)) return m
+                if (root !== undefined) {
+                  const real = safeRealpath(resolved)
+                  const inside = real === root || real.startsWith(root.endsWith(path.sep) ? root : root + path.sep)
+                  if (p.startsWith("~/") || !inside || isSecretPath(real)) return m
+                }
                 const content = readText(resolved, 50_000)
                 if (content === undefined) return m
                 seen.add(resolved)
-                const out = expandImports(content, resolved, seen, depth + 1, home).trim()
+                const out = expandImports(content, resolved, seen, depth + 1, home, confine).trim()
                 seen.delete(resolved)
                 return `${lead}${out}`
               }),
@@ -215,7 +246,10 @@ export function discoverWatchdog(dirs: string[], globalDir: string, home = os.ho
     seenFiles.add(real)
     const raw = readText(real)
     if (raw === undefined) continue
-    const content = expandImports(raw, real, new Set([real]), 0, home).trim()
+    // グローバル設定はユーザー自身のものなので制限しない。プロジェクト側は最上位ディレクトリの外を読ませない。
+    // Cấu hình global là của chính người dùng nên không giới hạn; cấu hình trong project không được đọc ra ngoài thư mục gốc.
+    const confine = path.dirname(real) === path.resolve(globalDir) ? undefined : dirs[0]
+    const content = expandImports(raw, real, new Set([real]), 0, home, confine).trim()
     if (content) out.push({ file: real, content })
   }
   return out
@@ -249,6 +283,8 @@ export function discoverWatchdogYaml(dirs: string[], globalDir: string): { file:
   }
   return out
 }
+
+const READ_ONLY_TOOLS: Record<string, true> = { read: true, grep: true, glob: true }
 
 // omp のツール名から opencode のツール名への対応。無いものは opencode に相当物がない。
 // Ánh xạ tên tool omp sang opencode; tên không có nghĩa là opencode không có tool tương đương.
@@ -309,7 +345,7 @@ const TOP_KEYS = keys("instructions", "maxNotesPerUpdate", "modelRoles", "adviso
 const ADVISOR_KEYS = keys(
   "enabled", "reviewMode", "reviewInterval", "maxNotesPerUpdate", "syncBacklog", "immuneTurns", "continueSeverity", "evictStaleResults",
   "maxSteersPerPrompt", "fetchLimit", "primeMessages", "primeChars", "maxMessageChars", "maxToolInputChars", "maxToolOutputChars",
-  "maxEditChars", "includeReasoning", "contextTokenBudget", "reviewTimeoutMs", "maxConsecutiveFailures", "toast", "explainToPrimary", "controlModel",
+  "maxEditChars", "includeReasoning", "contextTokenBudget", "reviewTimeoutMs", "maxConsecutiveFailures", "toast", "permissionTimeoutMs", "explainToPrimary", "controlModel",
 )
 const RETRY_KEYS = keys("enabled", "modelFallback", "fallbackOn", "fallbackRevertPolicy", "maxDelayMs", "fallbackChains")
 const ENTRY_KEYS = keys("name", "enabled", "model", "tools", "reviewMode", "reviewInterval", "syncBacklog", "maxNotesPerUpdate", "instructions")
@@ -332,9 +368,9 @@ function checkKeys(o: Obj, known: Record<string, true>, prefix: string, file: st
   }
 }
 
-function parseLayer(root: Obj, file: string, warnings: string[], home: string): Layer {
+function parseLayer(root: Obj, file: string, warnings: string[], home: string, confine?: string): Layer {
   const layer: Layer = { advisor: {}, retry: {}, agentAdvisor: {}, advisors: [] }
-  const imports = (text: string) => expandImports(text, file, new Set([file]), 0, home).trim()
+  const imports = (text: string) => expandImports(text, file, new Set([file]), 0, home, confine).trim()
   checkKeys(root, TOP_KEYS, "", file, warnings)
 
   const ins = str(root.instructions)
@@ -345,7 +381,15 @@ function parseLayer(root: Obj, file: string, warnings: string[], home: string): 
   else if (root.modelRoles !== undefined) warnings.push(`${file}: "modelRoles" must be a mapping; ignored`)
 
   if (isObj(root.tier)) {
-    for (const k of Object.keys(root.tier)) warnings.push(`${file}: "tier.${k}" is not supported by opencode-advisor; ignored`)
+    for (const k of Object.keys(root.tier)) {
+      if (k !== "advisor") {
+        warnings.push(`${file}: "tier.${k}" is not supported by opencode-advisor; ignored`)
+        continue
+      }
+      const v = typeof root.tier.advisor === "string" ? root.tier.advisor.trim().toLowerCase() : ""
+      if (v === "none" || v === "inherit" || Object.hasOwn(SERVICE_TIERS, v)) layer.advisor.serviceTier = v
+      else warnings.push(`${file}: tier.advisor must be none, inherit, ${Object.keys(SERVICE_TIERS).join(", ")}; ignored`)
+    }
   }
 
   if (root.advisor !== undefined) {
@@ -393,6 +437,7 @@ function parseLayer(root: Obj, file: string, warnings: string[], home: string): 
       set("reviewTimeoutMs", num(o.reviewTimeoutMs, 5_000, 3_600_000))
       set("maxConsecutiveFailures", num(o.maxConsecutiveFailures, 1, 20))
       set("toast", bool(o.toast))
+      set("permissionTimeoutMs", num(o.permissionTimeoutMs, 1_000, 3_600_000))
       set("explainToPrimary", bool(o.explainToPrimary))
       set("controlModel", str(o.controlModel))
     }
@@ -470,7 +515,17 @@ function parseLayer(root: Obj, file: string, warnings: string[], home: string): 
           if (!Array.isArray(e.tools)) warnings.push(`${where}.tools must be a list; ignored`)
           else {
             const names = e.tools.filter((x): x is string => typeof x === "string" && x.trim() !== "").map((x) => x.trim().toLowerCase())
-            spec.tools = normalizeTools(names, where, warnings)
+            const granted = normalizeTools(names, where, warnings)
+            // プロジェクト側の設定ファイルは読み取り専用ツールしか付与できない。リポジトリが書き込み・実行ツールを勝手に付与するのを防ぐため。
+            // File cấu hình trong project chỉ được cấp tool chỉ đọc, để repo không tự cấp tool ghi/chạy lệnh cho advisor.
+            if (confine === undefined) spec.tools = granted
+            else {
+              const kept = granted.filter((t) => READ_ONLY_TOOLS[t] === true)
+              for (const t of granted) if (READ_ONLY_TOOLS[t] !== true) warnings.push(`${where}.tools: a project file cannot grant "${t}"; dropped (grant it in the user-level WATCHDOG.yml)`)
+              // 全て落ちた場合は advisor が調査手段を失わないよう既定に戻す ([] は利用者が明示した場合だけ)。
+              // Nếu bị loại hết thì quay về mặc định để advisor không mất công cụ điều tra; [] chỉ khi người dùng viết rõ.
+              spec.tools = kept.length === 0 && granted.length > 0 ? [...DEFAULT_TOOLS] : kept
+            }
           }
         }
         if (e.reviewMode !== undefined) {
@@ -499,6 +554,30 @@ function parseLayer(root: Obj, file: string, warnings: string[], home: string): 
     }
   }
   return layer
+}
+
+/**
+ * A cheap fingerprint (path, mtime, size) of every file a configuration could come from, existing or not.
+ * A change means the configuration must be loaded again; a new file shows up as a new entry.
+ */
+export function configSignature(opts: LoadOptions): string {
+  const env = opts.env ?? process.env
+  const home = opts.home ?? os.homedir()
+  const gdir = globalConfigDir(env, home)
+  const files = [path.join(gdir, "WATCHDOG.yml"), path.join(gdir, "WATCHDOG.yaml"), path.join(gdir, "WATCHDOG.md")]
+  for (const d of ancestorDirs(opts.directory, opts.worktree, home)) {
+    for (const base of [d, path.join(d, ".opencode")]) files.push(path.join(base, "WATCHDOG.yml"), path.join(base, "WATCHDOG.yaml"), path.join(base, "WATCHDOG.md"))
+  }
+  return files
+    .map((f) => {
+      try {
+        const st = fs.statSync(f)
+        return `${f}:${st.mtimeMs}:${st.size}`
+      } catch {
+        return `${f}:-`
+      }
+    })
+    .join("|")
 }
 
 export interface LoadOptions {
@@ -535,7 +614,19 @@ export function loadConfig(opts: LoadOptions): AdvisorConfig {
       warnings.push(`${file}: expected a mapping; skipped`)
       continue
     }
-    layers.push(parseLayer(doc, file, warnings, home))
+    const isProject = path.dirname(file) !== path.resolve(gdir)
+    const layer = parseLayer(doc, file, warnings, home, isProject ? dirs[0] : undefined)
+    layers.push(layer)
+    if (isProject) {
+      // プロジェクトの設定が advisor のモデルを変えると、会話の内容が別の provider に送られる。気づけるよう必ず警告する。
+      // Cấu hình trong project mà đổi model của advisor thì nội dung hội thoại đi tới provider khác; luôn cảnh báo để người dùng biết.
+      const redirects = [
+        layer.modelRole ? `modelRoles.advisor=${layer.modelRole}` : "",
+        ...layer.advisors.filter((a) => a.model).map((a) => `advisors[${a.name}].model=${a.model}`),
+        Object.keys(layer.retry.fallbackChains ?? {}).length > 0 ? "retry.fallbackChains" : "",
+      ].filter(Boolean)
+      if (redirects.length > 0) warnings.push(`${file}: this project file chooses the advisor model (${redirects.join(", ")}); the session transcript will be sent to it. Only keep it if you trust this repository.`)
+    }
     sources.push(file)
   }
 
@@ -594,12 +685,16 @@ export function loadConfig(opts: LoadOptions): AdvisorConfig {
   return {
     ...s,
     maxNotesPerUpdate: notesDefault,
-    controlModel: controlModel ?? specs.find((x) => x.enabled && x.model && x.model !== "inherit")?.model,
+    // 明示されたときだけ使う。advisor のモデルを流用すると、そのモデルが無い場合に /advisor 自体が動かなくなる。
+    // Chỉ dùng khi được chỉ định tường minh; mượn model của advisor thì khi model đó không tồn tại, chính /advisor cũng hỏng.
+    controlModel,
     defaultModel: modelRole,
     retry,
     agentAdvisor,
     instructions: instructions.join("\n\n"),
-    watchdog: wd.map((w) => w.content).join("\n\n"),
+    // cwd が Git の外で子リポジトリがちょうど 1 つなら、どれが対象かを advisor に伝える (omp と同じ)。
+    // Nếu cwd ngoài Git và có đúng một repo con thì báo cho advisor biết đâu là project đang làm (giống omp).
+    watchdog: [...wd.map((w) => w.content), childRepositoryBlock(opts.directory)].filter(Boolean).join("\n\n"),
     advisors: specs,
     warnings,
     sources,

@@ -70,6 +70,21 @@ test("redact: removes well-known secret shapes", () => {
   assert.ok(!redact(pem).includes("MIIabc"))
 })
 
+test("redact: JSON/YAML-quoted keys, quoted values with spaces, pass/pwd names and more token families", () => {
+  const hidden: [string, string][] = [
+    ['{"apiKey": "abc12345678xyz"}', "abc12345678xyz"],
+    ['{"password":"hunter2hunter2"}', "hunter2hunter2"],
+    ['password: "correct horse battery"', "correct horse"],
+    ['client_secret = "abc 12345 678"', "abc 12345"],
+    ["DB_PASS=hunter2hunter", "hunter2hunter"],
+    ["glpat-" + "a1B2c3D4e5F6g7H8i9J0", "a1B2c3D4"],
+    ["npm_" + "a1B2c3D4e5".repeat(4), "a1B2c3D4e5a1B2c3"],
+    ["sk_live_" + "a1B2c3D4e5F6g7H8", "a1B2c3D4e5F6"],
+  ]
+  for (const [input, secret] of hidden) assert.ok(!redact(input).includes(secret), `leaked: ${input} -> ${redact(input)}`)
+  for (const s of ['apiKey: "string"', "secret: $SECRET_VALUE_X", "tokens: number", 'passed: "all 12 checks ok"', 'bypass: "skip validation here"', 'compass: "north-by-northwest"']) assert.equal(redact(s), s)
+})
+
 test("redact: leaves ordinary code and prose alone", () => {
   for (const s of ["const key = process.env.API_KEY", "the password field is required", "token = tokens.next()", "x = 5 // sk-"]) {
     assert.equal(redact(s), s)
@@ -217,4 +232,29 @@ test("config: OPENCODE_ADVISOR=off disables; WATCHDOG.md @imports expand, skippi
   assert.doesNotMatch(c.watchdog.replace(/`@\.\/nope\.md`/g, "").replace(/```[\s\S]*?```/g, ""), /nope/)
   const e = expandImports("a @./more.md b", path.join(proj, "WATCHDOG.md"), new Set(), 0, home)
   assert.match(e, /MORE/)
+})
+
+test("model selector: `:auto` is a level word, so `provider/model:auto` splits into the model and the auto marker", () => {
+  assert.deepEqual(parseModelSelector("a/b:auto"), { ref: { providerID: "a", modelID: "b" }, level: "auto" })
+  assert.deepEqual(parseModelSelector("a/b:high")?.level, "high")
+  assert.equal(parseModelSelector("a/b:nonsense")?.level, undefined, "an unknown suffix stays part of the model id")
+})
+
+test("render: plan-mode reminders keep their text as primary context (once), other system reminders collapse to one line, attached-file context is untouched", () => {
+  const user = (id: string, ...parts: Record<string, unknown>[]) => ({ info: { id, role: "user", time: { created: 1 } }, parts }) as unknown as Msg
+  const plan = "<system-reminder>\nPlan mode is active. Do not edit files.\n</system-reminder>"
+  const other = "<system-reminder>\nThe todo list is empty and has not been used in a while. Consider adding tasks.\n</system-reminder>"
+  const out = renderDelta(
+    [
+      user("u1", { type: "text", text: "do the thing" }, { type: "text", text: plan, synthetic: true }, { type: "text", text: other, synthetic: true }),
+      user("u2", { type: "text", text: "again" }, { type: "text", text: plan, synthetic: true }),
+      user("u3", { type: "text", text: "Called the Read tool: file contents here", synthetic: true }, { type: "text", text: "read it" }),
+    ],
+    OPTS,
+  )
+  assert.equal(out.match(/<primary-context kind="plan-mode">/g)?.length, 1, "the same plan-mode text is shown once")
+  assert.match(out, /Plan mode is active\. Do not edit files\./)
+  assert.match(out, /<hidden>The todo list is empty and has not been used in a while\. Consider adding tasks\.<\/hidden>/)
+  assert.match(out, /file contents here/, "synthetic text that is not a system reminder (attached files) stays")
+  assert.match(out, /<user id="u1">\ndo the thing\n<\/user>/, "the user's own words are unchanged")
 })

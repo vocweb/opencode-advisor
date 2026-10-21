@@ -1,6 +1,6 @@
 // E2E harness: a scripted OpenAI-compatible mock LLM + a real `opencode serve` process.
 import http from "node:http"
-import { spawn } from "node:child_process"
+import { execFileSync, spawn } from "node:child_process"
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
@@ -8,6 +8,13 @@ import { createOpencodeClient } from "@opencode-ai/sdk"
 import { stringify as yamlStringify } from "yaml"
 
 export const OPENCODE_BIN = process.env.OPENCODE_BIN || "opencode"
+
+// v1 の harness を v2 の binary で動かすと 405 などで不可解に落ちるため、最初に版を確認して明確なエラーにする。
+// Chạy harness v1 với binary v2 sẽ lỗi khó hiểu (405...), nên kiểm phiên bản trước và báo lỗi rõ ràng.
+function assertV1Binary() {
+  const binVersion = execFileSync(OPENCODE_BIN, ["--version"], { encoding: "utf8" }).trim()
+  if (!/^(opencode )?v?1\./.test(binVersion)) throw new Error(`The v1 E2E suite needs an opencode 1.x binary (OPENCODE_BIN), got "${binVersion}". Use test:e2e:v2 for 2.x.`)
+}
 
 export const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
@@ -59,6 +66,7 @@ export async function startMock(handler) {
       `data: ${JSON.stringify({ id, object: "chat.completion.chunk", created: 1, model: body.model, choices: [{ index: 0, delta, finish_reason: finish ?? null }] })}\n\n`
     res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache" })
     res.write(chunk({ role: "assistant", content: "" }))
+    if (out.reasoning) res.write(chunk({ reasoning_content: out.reasoning }))
     if (out.text) res.write(chunk({ content: out.text }))
     const calls = out.toolCalls || []
     calls.forEach((c, i) => {
@@ -88,6 +96,9 @@ function modelEntry(name) {
 
 /** Starts `opencode serve` in an isolated sandbox. Returns { client, dir, stop, logs }. */
 export async function startOpencode({ mockPort, pluginFiles = {}, projectFiles = {}, advisorConfig, extraConfig = {}, globalFiles = {}, root: reuseRoot }) {
+  // harness-v2 も本ファイルを import するため、版の確認は v1 の起動経路でのみ行う。
+  // harness-v2 cũng import file này, nên chỉ kiểm phiên bản ở đường khởi động v1.
+  assertV1Binary()
   // macOS tmpdir is a symlink (/var -> /private/var); opencode compares real paths for its external_directory rule.
   const root = reuseRoot ?? fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "oc-e2e-")))
   const home = path.join(root, "home")

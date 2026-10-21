@@ -54,18 +54,49 @@ test("fallback: fallbackOn gates which failures switch", () => {
   assert.equal(chain(retry({ fallbackOn: "any", fallbackChains: chains })).c.onFailure("other"), "switched")
 })
 
-test("fallback: a refusal pins the fallback for that review only (no cooldown), unless the policy is never", () => {
-  const chains = { advisor: ["f/one"] }
+test("fallback: a refusal by the primary pins the fallback until reset; a refusing fallback is cooled down, not pinned", () => {
+  const chains = { advisor: ["f/one", "f/two"] }
   const a = chain(retry({ fallbackChains: chains }))
   assert.equal(a.c.onFailure("refusal"), "switched")
   assert.equal(a.c.current(), "f/one")
-  a.c.onSuccess()
-  assert.equal(a.c.current(), "p/main", "the primary is tried again at the next review")
-  const n = chain(retry({ fallbackChains: chains, fallbackRevertPolicy: "never", maxDelayMs: 1 }))
+  assert.equal(a.c.onFailure("refusal"), "switched", "a fallback that refuses is skipped with a cooldown")
+  assert.equal(a.c.current(), "f/two")
+  a.tick(1_000)
+  assert.equal(a.c.current(), "f/two", "the refused fallback stays cooled down, and the primary is not retried: the refused content is still in the advisor's context")
+  a.tick(10_000_000)
+  assert.notEqual(a.c.current(), "p/main", "even after the cooldown the primary stays pinned out")
+  a.c.onReset()
+  assert.equal(a.c.current(), "p/main", "a compaction or new conversation (reset) retries the primary")
+})
+
+test("fallback: when the primary and the only fallback both refuse, it settles instead of switching back and forth", () => {
+  const a = chain(retry({ fallbackChains: { advisor: ["f/one"] } }))
+  assert.equal(a.c.onFailure("refusal"), "switched", "the primary refuses: move to the fallback")
+  assert.equal(a.c.current(), "f/one")
+  assert.equal(a.c.onFailure("refusal"), "stay", "the fallback refuses too: nowhere to go")
+  assert.equal(a.c.current(), "p/main", "every model is cooling down: the primary is used rather than nothing")
+  assert.equal(a.c.onFailure("refusal"), "stay", "a refusal while already pinned out must not switch again")
+})
+
+test("fallback: wouldSwitch reports whether a failure could move to another model without changing state", () => {
+  const { c } = chain(retry({ fallbackChains: { advisor: ["f/one"] } }))
+  assert.equal(c.wouldSwitch("usage-limit"), true)
+  assert.equal(c.current(), "p/main")
+  assert.equal(chain(retry()).c.wouldSwitch("usage-limit"), false)
+  assert.equal(chain(retry({ fallbackOn: "except-usage-limit", fallbackChains: { advisor: ["f/one"] } })).c.wouldSwitch("usage-limit"), false)
+})
+
+test("fallback: with the never policy the runtime stays on the fallback it moved to after a cooldown", () => {
+  const n = chain(retry({ fallbackChains: { advisor: ["f/one"] }, fallbackRevertPolicy: "never", maxDelayMs: 1 }))
   assert.equal(n.c.onFailure("other"), "switched")
   n.tick(10_000)
-  n.c.onSuccess()
-  assert.equal(n.c.current(), "f/one", "never returns on its own, even after the cooldown")
+  assert.equal(n.c.current(), "f/one")
   n.c.onReset()
   assert.equal(n.c.current(), "p/main")
+})
+
+test("fallback: a model that is not in the catalog is its own kind (v1 ProviderModelNotFoundError, v2 provider.no-route)", () => {
+  assert.equal(classifyFailure("ProviderModelNotFoundError", "Model not found: mock/ghost"), "no-model")
+  assert.equal(classifyFailure("provider.no-route", "Model unavailable: mock/ghost"), "no-model")
+  assert.equal(classifyFailure("APIError", "429 Too Many Requests"), "usage-limit", "other kinds are unchanged")
 })

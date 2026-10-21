@@ -46,7 +46,7 @@ export function parseModel(s: string | undefined | null): ModelRef | undefined {
   return { providerID: s.slice(0, i), modelID: s.slice(i + 1) }
 }
 
-const LEVELS: Record<string, true> = { off: true, minimal: true, low: true, medium: true, high: true, xhigh: true, max: true }
+const LEVELS: Record<string, true> = { auto: true, off: true, minimal: true, low: true, medium: true, high: true, xhigh: true, max: true }
 
 // 既知の思考レベル語だけを接尾辞とみなす。モデル ID に ":" が含まれ得るため。
 // Chỉ coi từ level đã biết là hậu tố, vì model id có thể chứa ":" hợp lệ.

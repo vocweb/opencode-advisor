@@ -8,7 +8,7 @@ import { loadConfig, type AdvisorSpec } from "../../src/config.ts"
 import { Delivery } from "../../src/delivery.ts"
 import { Registry } from "../../src/registry.ts"
 import type { AdvisorRuntime } from "../../src/runtime.ts"
-import type { Client } from "../../src/types.ts"
+import type { Host } from "../../src/host.ts"
 
 const COMMENTED = "# mine\nmodelRoles:\n  advisor: a/b\nadvisors:\n  - name: Sec # keep\n  - name: Style\n    enabled: false\n"
 
@@ -21,13 +21,13 @@ function setup() {
   const env = { XDG_CONFIG_HOME: path.join(home, "xdg") }
   const cfg = loadConfig({ directory: project, home, env })
   const applied: string[] = []
-  const client = { session: { children: async () => ({ data: [] }), messages: async () => ({ data: [] }) } } as unknown as Client
+  const host = { log: () => {}, advisorChildren: async () => [], transcript: async () => [] } as unknown as Host
   const ctx: CommandCtx = {
     cfg,
     specs: cfg.advisors,
-    client,
+    host,
     registry: new Registry(),
-    delivery: new Delivery(client, cfg, () => {}),
+    delivery: new Delivery(host, cfg),
     runtimes: new Map<string, AdvisorRuntime[]>(),
     disabledSessions: new Set(),
     directory: project,
@@ -36,6 +36,7 @@ function setup() {
     runtimesFor: () => [],
     disposeSession: () => {},
     applyEnabled: (s: AdvisorSpec) => void applied.push(`${s.slug}:${s.enabled}`),
+    reload: () => ({ applied: [], restart: [], warnings: [] }),
   }
   return { ctx, project, gdir, applied }
 }
@@ -86,4 +87,20 @@ test("commands: status lists every roster entry, a disabled one as paused", asyn
   const out = await control(ctx, "s", "status")
   assert.match(out, /\| Sec \| idle \| a\/b \|/)
   assert.match(out, /\| Style \| paused \|/)
+})
+
+test("commands: `model <name> <selector>` writes that entry's model, keeps comments, and resets its runtimes", async () => {
+  const { ctx, project } = setup()
+  const file = path.join(project, ".opencode/WATCHDOG.yml")
+  let reset = 0
+  ctx.runtimes.set("s", [{ spec: ctx.specs.find((s) => s.slug === "sec")!, reset: () => void reset++ } as unknown as AdvisorRuntime])
+  assert.match(await control(ctx, "s", "model Sec anthropic/claude-haiku-4-5:low"), /now uses `anthropic\/claude-haiku-4-5:low`/)
+  const text = fs.readFileSync(file, "utf8")
+  assert.match(text, /# mine/)
+  assert.match(text, /name: Sec # keep\n\s+model: anthropic\/claude-haiku-4-5:low/)
+  assert.equal(ctx.specs.find((s) => s.slug === "sec")!.model, "anthropic/claude-haiku-4-5:low")
+  assert.equal(reset, 1)
+  assert.match(await control(ctx, "s", "model Sec nonsense"), /is not "provider\/model"/)
+  assert.match(await control(ctx, "s", "model nope a/b"), /No advisor named "nope"/)
+  assert.match(await control(ctx, "s", "model Sec"), /Usage/)
 })

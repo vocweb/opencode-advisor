@@ -1,6 +1,7 @@
 // End-to-end suite: the built plugin (dist/advisor.js) running inside a real `opencode serve`,
 // talking to a scripted OpenAI-compatible mock LLM. Run `npm run build` first.
-import { createRunner, makeEnv, sleep, waitFor, textOf } from "./lib.mjs"
+import { stringify as yamlStringify } from "yaml"
+import { createRunner, makeEnv, sleep, waitFor, textOf, toWatchdog } from "./lib.mjs"
 
 const only = process.argv.slice(2) // optional scenario-name filters
 const R = createRunner()
@@ -556,17 +557,36 @@ await scenario("compaction: summarizing the primary resets the advisor", async (
   }
 })
 
-await scenario("budget: an advisor over its token budget is re-primed in a fresh session", async (check) => {
+const SUMMARY_REQUEST = /Here is the conversation so far/
+
+await scenario("budget: an advisor over its token budget is summarized and keeps its session", async (check) => {
   const env = await makeEnv({ advisor: { model: "mock/adv", immuneTurns: 0, reviewTimeoutMs: 30000, contextTokenBudget: 50000 } })
   try {
     env.st.advisorPlan = () => ({ text: "No findings.", promptTokens: 80000 })
     const s = await env.newSession("budget")
-    await env.run(s.id, "turn one")
-    await env.settle()
-    await env.run(s.id, "turn two")
-    await env.settle()
-    await env.run(s.id, "turn three")
-    await env.settle()
+    for (const t of ["turn one", "turn two", "turn three"]) {
+      await env.run(s.id, t)
+      await env.settle()
+    }
+    const kids = (await env.children(s.id)).filter((k) => k.title.startsWith("[advisor]"))
+    check("a summarize request was made to the advisor model", env.mock.requests.some((r) => r.model === "adv" && SUMMARY_REQUEST.test(JSON.stringify(r.messages.at(-1)))))
+    check("the advisor kept its session (no rebuild)", kids.length === 1, kids.map((k) => k.title))
+    check("it was not told its context was reset", !env.st.advisorCalls.some((c) => /context was reset/.test(c)))
+  } finally {
+    await env.stop()
+  }
+})
+
+await scenario("budget: when summarizing fails the advisor is re-primed in a fresh session", async (check) => {
+  const env = await makeEnv({ advisor: { model: "mock/adv", immuneTurns: 0, reviewTimeoutMs: 30000, contextTokenBudget: 50000 } })
+  try {
+    env.st.advisorPlan = () => ({ text: "No findings.", promptTokens: 80000 })
+    env.st.summarizePlan = () => ({ status: 400, body: "cannot summarize" })
+    const s = await env.newSession("budget2")
+    for (const t of ["turn one", "turn two", "turn three"]) {
+      await env.run(s.id, t)
+      await env.settle()
+    }
     const kids = (await env.children(s.id)).filter((k) => k.title.startsWith("[advisor]"))
     const R_ = env.reviewStarts().length
     check("re-primed after growing, but never per review (a session lives for >= 2 reviews)", kids.length >= 2 && kids.length <= Math.ceil(R_ / 2), [kids.length, R_])
@@ -944,6 +964,311 @@ await scenario("syncBacklog: /advisor itself is never held by a strict wait", as
     check("the review was still in flight", /reviewing/.test(out), out)
   } finally {
     await env.stop()
+  }
+})
+
+await scenario("fallback: a retryable 429 does not hang the review; the chain moves to the next model", async (check) => {
+  const env = await makeEnv({
+    advisor: { model: "mock/adv", immuneTurns: 0, reviewTimeoutMs: 60000, retry: { fallbackChains: { advisor: ["mock/alt"] }, maxDelayMs: 600000 } },
+  })
+  try {
+    // opencode retries 429 by itself with growing delays and never returns; the plugin must notice the retry status.
+    env.st.advisorPlan = (ctx) => (ctx.model === "adv" ? { status: 429, body: "Too many requests: rate limit exceeded" } : { text: "No findings." })
+    const s = await env.newSession("retry429")
+    await env.run(s.id, "hello")
+    const t0 = Date.now()
+    await waitFor(() => env.reviewStarts().some((r) => r.model === "alt"), { timeout: 40000, label: "review on the fallback model" }).catch(() => {})
+    check("the review reached the fallback model well before reviewTimeoutMs", env.reviewStarts().some((r) => r.model === "alt"), env.reviewStarts().map((r) => r.model))
+    check("and quickly", Date.now() - t0 < 30000, Date.now() - t0)
+  } finally {
+    await env.stop()
+  }
+})
+
+await scenario("tools: a granted mutating tool follows the user's permission policy (ask, with a timeout) instead of running silently", async (check) => {
+  const fs = await import("node:fs")
+  const path = await import("node:path")
+  for (const policy of ["ask", "allow"]) {
+    const env = await makeEnv({
+      // Tool ghi chỉ cấp được từ cấu hình cấp người dùng nên đặt trong WATCHDOG.yml global.
+      advisor: null,
+      globalFiles: { "WATCHDOG.yml": yamlStringify(toWatchdog({ model: "mock/adv", immuneTurns: 0, reviewTimeoutMs: 60000, permissionTimeoutMs: 3000, advisors: [{ name: "Fixer", tools: ["read", "write"] }] })) },
+      extraConfig: policy === "allow" ? { permission: { edit: "allow" } } : {},
+    })
+    try {
+      const target = path.join(env.oc.dir, "advisor-wrote.txt")
+      let wrote = false
+      env.st.advisorPlan = () => {
+        if (!wrote) {
+          wrote = true
+          return { toolCalls: [{ name: "write", args: { filePath: target, content: "by the advisor" } }] }
+        }
+        return { text: "No findings." }
+      }
+      env.st.afterTools = () => ({ text: "No findings." })
+      const s = await env.newSession(`perm-${policy}`)
+      // A plain rejection ends the advisor's turn, so no further model request follows; the review must simply finish.
+      const t0 = Date.now()
+      await env.run(s.id, "hello")
+      await waitFor(async () => /\| Fixer \| idle \|/.test(await env.command(s.id, "status")) && env.reviewStarts().length >= 1, { timeout: 30000, label: "review finished" }).catch(() => {})
+      const finished = /\| Fixer \| idle \|/.test(await env.command(s.id, "status"))
+      const exists = fs.existsSync(target)
+      if (policy === "ask") check("without a user rule the write is not performed silently, and the review ends instead of waiting forever", !exists && finished && Date.now() - t0 < 30000, { exists, finished })
+      else check("with the user's own allow rule the write runs", exists)
+    } finally {
+      await env.stop()
+    }
+  }
+})
+
+await scenario("strict: a nit found while the primary waits is already in the primary's next LLM request", async (check) => {
+  const env = await makeEnv({ advisor: { model: "mock/adv", immuneTurns: 0, reviewTimeoutMs: 30000, syncBacklog: "strict" } })
+  try {
+    env.st.mainDelay = 100
+    let sent = false
+    env.st.advisorPlan = (ctx, upd) => {
+      if (!sent && /STRICT_ME/.test(upd)) {
+        sent = true
+        return { delayMs: 600, toolCalls: [adviseCall("STRICT_NOTE: prefer the named constant over the literal 30.", "nit")] }
+      }
+      return { text: "No findings." }
+    }
+    const s = await env.newSession("strict-note")
+    await env.run(s.id, "RUN_STEPS:2 STRICT_ME")
+    await env.settle(2500)
+    const second = env.mainReqs()[1]
+    check("the primary made a second request", !!second, env.mainReqs().length)
+    check("the aside is already in that request, not one request later", /STRICT_NOTE/.test(JSON.stringify(second?.messages ?? [])), second && JSON.stringify(second.messages).slice(-300))
+  } finally {
+    await env.stop()
+  }
+})
+
+await scenario("fallback: when every model refuses, the number of advisor requests stays bounded", async (check) => {
+  const env = await makeEnv({ advisor: { model: "mock/adv", immuneTurns: 0, reviewTimeoutMs: 30000, retry: { fallbackChains: { advisor: ["mock/alt"] }, maxDelayMs: 600000 } } })
+  try {
+    env.st.advisorPlan = () => ({ status: 400, body: "the model refused the request" })
+    const s = await env.newSession("refuse")
+    await env.run(s.id, "hello")
+    await env.settle(4000, 30000)
+    const n = env.advisorReqs().length
+    check("a bounded number of attempts (no endless switching)", n >= 2 && n <= 8, n)
+    check("the primary still answered", /plain reply/.test(JSON.stringify((await env.transcript(s.id)).filter((m) => m.info.role === "assistant").at(-1))))
+  } finally {
+    await env.stop()
+  }
+})
+
+await scenario("scrub: grep results from a secret file never reach the advisor model; other files do", async (check) => {
+  const env = await makeEnv({
+    advisor: { model: "mock/adv", immuneTurns: 0, reviewTimeoutMs: 30000, advisors: [{ name: "Digger", tools: ["read", "grep"] }] },
+    projectFiles: { ".env": "DB_PASSWORD=LEAK_MARKER_9f8e7d6c\n", "src/ok.txt": "OK_MARKER visible line\n" },
+  })
+  try {
+    env.st.advisorPlan = (ctx) => {
+      if (ctx.messages.some((m) => m.role === "tool")) return { text: "No findings." }
+      return { toolCalls: [{ name: "grep", args: { pattern: "_MARKER", path: env.oc.dir } }] }
+    }
+    const s = await env.newSession("scrub")
+    await env.run(s.id, "hello")
+    await env.settle(3000)
+    const seen = env.advisorReqs().flatMap((r) => r.messages.filter((m) => m.role === "tool").map((m) => JSON.stringify(m.content))).join("\n")
+    check("the advisor did get a grep result", seen.length > 0, seen)
+    check("a match in a normal file is visible", /OK_MARKER/.test(seen), seen)
+    check("a match in .env is not", !/LEAK_MARKER/.test(seen), seen)
+  } finally {
+    await env.stop()
+  }
+})
+
+await scenario("strict: a blocker found while the primary waits is in the primary's next LLM request too", async (check) => {
+  const env = await makeEnv({ advisor: { model: "mock/adv", immuneTurns: 0, reviewTimeoutMs: 30000, syncBacklog: "strict" } })
+  try {
+    env.st.mainDelay = 100
+    let sent = false
+    env.st.advisorPlan = (ctx, upd) => {
+      if (!sent && /STRICT_BLOCK/.test(upd)) {
+        sent = true
+        return { delayMs: 600, toolCalls: [adviseCall("BLOCKER_NOTE: the migration drops the table.", "blocker")] }
+      }
+      return { text: "No findings." }
+    }
+    const s = await env.newSession("strict-blocker")
+    await env.run(s.id, "RUN_STEPS:3 STRICT_BLOCK")
+    await env.settle(2500)
+    const reqs = env.mainReqs()
+    check("the primary made at least two requests", reqs.length >= 2, reqs.length)
+    check("the blocker is in request 2, not one request later", /BLOCKER_NOTE/.test(JSON.stringify(reqs[1]?.messages ?? [])), reqs.map((r) => /BLOCKER_NOTE/.test(JSON.stringify(r.messages))))
+  } finally {
+    await env.stop()
+  }
+})
+
+await scenario("loop guard: an advisor repeating the same call is reminded on the 3rd, stopped on the 4th, without a failure or a fallback", async (check) => {
+  const env = await makeEnv({ advisor: { model: "mock/adv", immuneTurns: 0, reviewTimeoutMs: 30000, maxConsecutiveFailures: 1, retry: { fallbackChains: { advisor: ["mock/alt"] }, maxDelayMs: 600000 } } })
+  try {
+    const again = () => ({ toolCalls: [{ name: "grep", args: { pattern: "needle", path: env.oc.dir } }] })
+    env.st.advisorPlan = again
+    env.st.afterTools = again // 結果を受け取った後も同じ呼び出しを繰り返す / sau khi nhận kết quả vẫn lặp lại cùng một lệnh gọi
+    const s = await env.newSession("loop")
+    const reply = await env.run(s.id, "hello")
+    await env.settle(3000, 30000)
+    const reqs = env.advisorReqs()
+    // 1 review あたり: 最初の prompt + 最大 4 回の呼び出し + 打ち切り後の 1 回。review が複数回起きても、1 回ごとに有限であること。
+    // Mỗi review: prompt đầu + tối đa 4 lần gọi + 1 lần sau khi bị dừng; dù có nhiều review thì mỗi review đều hữu hạn.
+    const reviews = env.reviewStarts().length
+    check("every review ends after a handful of requests", reviews >= 1 && reqs.length >= 3 && reqs.length <= reviews * 6, [reviews, reqs.length])
+    const results = reqs.flatMap((r) => r.messages.filter((m) => m.role === "tool").map((m) => JSON.stringify(m.content))).join("\n")
+    check("the model was told it is repeating itself", /exact call/.test(results), results.slice(-300))
+    check("only the primary-chosen model was used (no fallback)", reqs.every((r) => r.model === "adv"), reqs.map((r) => r.model))
+    const st = await env.command(s.id, "status")
+    check("the advisor is not halted by it", !/halted|failed/.test(st), st.slice(0, 500))
+    check("the primary was not affected", reply.parts.some((p) => p.type === "text"))
+  } finally {
+    await env.stop()
+  }
+})
+
+await scenario("level: a `:high` suffix on the advisor model is sent as the thinking level (variant) instead of being ignored", async (check) => {
+  const env = await makeEnv({ advisor: { model: "mock/adv:high", immuneTurns: 0, reviewTimeoutMs: 30000 } })
+  try {
+    const s = await env.newSession("level")
+    await env.run(s.id, "hello")
+    await env.settle()
+    check("the advisor reviewed", env.reviewStarts().length >= 1, env.reviewStarts().length)
+    const kids = (await env.children(s.id)).filter((k) => String(k.title).startsWith("[advisor]"))
+    const msgs = kids.length ? await env.transcript(kids[0].id) : []
+    const variants = msgs.map((m) => m.info.variant ?? m.info.model?.variant).filter(Boolean)
+    check("the advisor session's messages carry variant=high", variants.includes("high"), msgs.map((m) => JSON.stringify(m.info).slice(0, 160)))
+  } finally {
+    await env.stop()
+  }
+})
+
+await scenario("fork: a forked session is reviewed from now on, not from the copied history", async (check) => {
+  const env = await makeEnv()
+  try {
+    const s = await env.newSession("origin")
+    await env.run(s.id, "FORK_HISTORY_MARK first turn")
+    await env.settle()
+    const fork = (await env.c.session.fork({ path: { id: s.id }, body: {} })).data
+    check("the fork was created", !!fork?.id, fork)
+    const mark = env.st.advisorCalls.length
+    await env.run(fork.id, "SECOND_TURN_MARK after the fork")
+    await env.settle()
+    const last = env.st.advisorCalls.slice(mark).join("\n")
+    check("the advisor saw the new turn", /SECOND_TURN_MARK/.test(last), last.slice(0, 200))
+    check("and not the copied history", !/FORK_HISTORY_MARK/.test(last), last.slice(0, 200))
+  } finally {
+    await env.stop()
+  }
+})
+
+await scenario("revert: rewriting the primary's history resets the advisor (a fresh advisor session)", async (check) => {
+  const env = await makeEnv()
+  try {
+    const s = await env.newSession("revert")
+    await env.run(s.id, "first turn")
+    await env.settle()
+    await env.run(s.id, "second turn")
+    await env.settle()
+    const before = (await env.children(s.id)).filter((k) => k.title.startsWith("[advisor]")).length
+    const msgs = (await env.c.session.messages({ path: { id: s.id } })).data
+    const firstUser = msgs.find((m) => m.info.role === "user")
+    await env.c.session.revert({ path: { id: s.id }, body: { messageID: firstUser.info.id } })
+    await env.settle(1500)
+    await env.run(s.id, "third turn after the revert")
+    await env.settle()
+    const after = (await env.children(s.id)).filter((k) => k.title.startsWith("[advisor]")).length
+    check("a new advisor session was opened", after === before + 1, [before, after])
+    check("the advisor was told its context was reset", env.st.advisorCalls.some((c) => /context was reset/.test(c)))
+  } finally {
+    await env.stop()
+  }
+})
+
+await scenario("no_model: a model missing from the catalog does not halt the advisor; setup recovers it", async (check) => {
+  const env = await makeEnv({ advisor: { model: "mock/ghost", immuneTurns: 0, reviewTimeoutMs: 30000, maxConsecutiveFailures: 1 } })
+  try {
+    const s = await env.newSession("ghost")
+    await env.run(s.id, "one")
+    await env.settle(2500, 30000)
+    await env.run(s.id, "two")
+    await env.settle(2500, 30000)
+    // 待機中に失敗するレビューを回し続けていないこと (2 回の測定の間に失敗ログが増えない)。
+    // Không được liên tục chạy lại review thất bại trong lúc chờ (số log thất bại không tăng giữa hai lần đo).
+    const failed = () => env.oc.logs.join("").split("\n").filter((l) => /advisor review failed/.test(l)).length
+    const f1 = failed()
+    await sleep(2500)
+    const f2 = failed()
+    check("it does not keep retrying while it waits", f1 === f2 && f1 <= 6, [f1, f2])
+    const st = await env.command(s.id, "status")
+    check("the advisor waits as no_model", /no_model/.test(st), st.slice(0, 600))
+    check("it is not halted", !/halted|\| failed \|/.test(st), st.slice(0, 600))
+    const ok = await env.command(s.id, "setup mock/adv")
+    check("setup acknowledged", /mock\/adv/.test(ok), ok)
+    await env.run(s.id, "three")
+    await env.settle()
+    check("reviews start on the real model", env.reviewStarts().some((r) => r.model === "adv"), env.reviewStarts().map((r) => r.model))
+  } finally {
+    await env.stop()
+  }
+})
+
+await scenario("reload: editing WATCHDOG.yml takes effect at the next boundary without a restart, and /advisor reload applies it now", async (check) => {
+  const fs = await import("node:fs")
+  const path = await import("node:path")
+  const env = await makeEnv({ advisor: null, projectFiles: { ".opencode/WATCHDOG.yml": "modelRoles: {advisor: mock/adv}\nadvisor: {immuneTurns: 0, reviewTimeoutMs: 30000}\n" } })
+  try {
+    const file = path.join(env.oc.dir, ".opencode/WATCHDOG.yml")
+    const s = await env.newSession("reload")
+    await env.run(s.id, "one")
+    await env.settle()
+    check("the first review used adv", env.reviewStarts().length >= 1 && env.reviewStarts().every((r) => r.model === "adv"), env.reviewStarts().map((r) => r.model))
+    fs.writeFileSync(file, "modelRoles: {advisor: mock/alt}\nadvisor: {immuneTurns: 0, reviewTimeoutMs: 30000}\n")
+    const before = env.reviewStarts().length
+    await env.run(s.id, "two")
+    await env.settle()
+    const after = env.reviewStarts().slice(before).map((r) => r.model)
+    check("after the edit the next review used alt, with no restart", after.length >= 1 && after.every((r) => r === "alt"), after)
+    fs.writeFileSync(file, "modelRoles: {advisor: mock/adv}\nadvisor: {immuneTurns: 0, reviewTimeoutMs: 30000}\n")
+    const out = await env.command(s.id, "reload")
+    check("/advisor reload reports what changed", /Configuration reloaded/.test(out) && /model/.test(out), out)
+    const mark = env.reviewStarts().length
+    await env.run(s.id, "three")
+    await env.settle()
+    check("and the review after it used adv again", env.reviewStarts().slice(mark).every((r) => r.model === "adv") && env.reviewStarts().length > mark, env.reviewStarts().slice(mark).map((r) => r.model))
+    fs.writeFileSync(file, "modelRoles: {advisor: mock/adv}\nadvisor: {immuneTurns: 0, reviewTimeoutMs: 30000}\nadvisors:\n  - {name: Advisor}\n  - {name: Late}\n")
+    const rep = await env.command(s.id, "reload")
+    check("a brand-new advisor needs a restart on 1.x and says so (it is not started half-built)", /new advisor/.test(rep) && /restart/i.test(rep), rep)
+  } finally {
+    await env.stop()
+  }
+})
+
+await scenario("restart: after opencode restarts the advisor continues in its own session instead of opening a second one", async (check) => {
+  const env1 = await makeEnv({})
+  const root = env1.oc.root
+  let sid
+  try {
+    const s = await env1.newSession("long-lived")
+    sid = s.id
+    await env1.run(s.id, "BEFORE_RESTART")
+    await env1.settle()
+    check("a first advisor session exists", (await env1.children(s.id)).filter((k) => String(k.title).startsWith("[advisor]")).length === 1)
+  } finally {
+    await env1.stop()
+  }
+  const env2 = await makeEnv({ root })
+  try {
+    await env2.run(sid, "AFTER_RESTART")
+    await env2.settle()
+    const kids = (await env2.children(sid)).filter((k) => String(k.title).startsWith("[advisor]"))
+    check("still exactly one advisor session (it was reused)", kids.length === 1, kids.map((k) => k.title))
+    check("the new turn was reviewed", env2.st.advisorCalls.some((c) => /AFTER_RESTART/.test(c)))
+    check("without being told its context was reset", !env2.st.advisorCalls.some((c) => /context was reset/.test(c)))
+  } finally {
+    await env2.stop()
   }
 })
 

@@ -1,6 +1,6 @@
 import { test } from "node:test"
 import assert from "node:assert/strict"
-import { evictStaleResults } from "../../src/plugin.ts"
+import { evictStaleResults, scrubInvestigationResults, scrubSecretOutput, SECRET_HIDDEN } from "../../src/policy.ts"
 import { renderAdvisories, renderAdvisory } from "../../src/prompts.ts"
 import type { Msg, Note } from "../../src/types.ts"
 
@@ -33,4 +33,22 @@ test("renderAdvisory: stale notes say how old they are; guidance only on the fir
   assert.match(old, /\nT-3\nthen\n/)
   const batch = renderAdvisories([n("a", 5), n("b", 5)], { nowTurn: 5, guidance: true })
   assert.equal(batch.match(/guidance=/g)?.length, 1)
+})
+
+test("scrubSecretOutput: matches from secret files are hidden in grep/glob output, other files and redactable tokens are handled", () => {
+  const grep = ["Found 3 matches", "/p/.env:", "  Line 1: DB=hunter2hunter2", "/p/src/a.ts:", "  Line 9: const x = 1", "/p/config/secrets.yml:12:password: x1"].join("\n")
+  const out = scrubSecretOutput(grep)
+  assert.ok(!out.includes("hunter2hunter2") && !out.includes("password: x1"), out)
+  assert.ok(out.includes("const x = 1") && out.includes("Found 3 matches"))
+  assert.ok(out.includes(SECRET_HIDDEN))
+  assert.equal(scrubSecretOutput("/p/.env\n/p/src/a.ts"), `${SECRET_HIDDEN}\n/p/src/a.ts`, "glob output lists one path per line")
+  assert.equal(scrubSecretOutput("/p/src/a.ts:3:const apiKey = \"abc12345678xyz\"").includes("abc12345678xyz"), false, "redaction still applies to other files")
+})
+
+test("scrubInvestigationResults: rewrites read/grep/glob tool parts and leaves other tools alone", () => {
+  const msgs = [msg("assistant", tool("grep", "/p/.env:\n  Line 1: K=v1v1v1v1v1"), tool("bash", "/p/.env:\n  Line 1: K=keep"))]
+  scrubInvestigationResults(msgs)
+  const [g, b] = msgs[0]!.parts as unknown as { state: { output: string } }[]
+  assert.equal(g!.state.output, SECRET_HIDDEN)
+  assert.ok(b!.state.output.includes("K=keep"))
 })
