@@ -21,6 +21,8 @@ jobs:
       - run: npm install
       - run: npm run check
 
+  # 固定版は回帰ゲート。
+  # Bản ghim là cổng hồi quy.
   e2e:
     needs: check
     runs-on: ubuntu-latest
@@ -28,13 +30,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # 固定版 (v1 / v2) は回帰ゲート、latest は将来の API 変更を早く検知するカナリア。
-          # Bản ghim (v1 / v2) là cổng hồi quy; latest là canary để phát hiện sớm thay đổi API tương lai.
           - { line: v1, pkg: "opencode-ai@1.19.3", want: "1.19.3", script: test:e2e, pack: test:pack }
           - { line: v2, pkg: "@opencode/cli@2.1.0", want: "2.1.0", script: "test:e2e:v2", pack: "test:pack:v2" }
-          - { line: v1-latest, pkg: "opencode-ai@latest", script: test:e2e, pack: test:pack, canary: true }
-          - { line: v2-latest, pkg: "@opencode/cli@latest", script: "test:e2e:v2", pack: "test:pack:v2", canary: true }
-    continue-on-error: ${{ matrix.canary == true }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -43,36 +40,60 @@ jobs:
       - run: npm install
       - run: npm run build
       - run: npm install --prefix /tmp/oc-bin ${{ matrix.pkg }}
-      # 入れたバイナリが本当に狙った版か確認する。違えば別物をテストしていることになる。
-      # Xác nhận binary vừa cài đúng phiên bản định thử; sai là đang thử nhầm thứ khác.
+      # 入れたバイナリが本当に狙った版か確認する。v1 は "1.19.3"、v2 は "opencode v2.1.0" と表示する。
+      # Xác nhận binary vừa cài đúng phiên bản định thử; v1 in "1.19.3", v2 in "opencode v2.1.0".
       - name: assert the installed opencode version
         env: { WANT: "${{ matrix.want }}" }
         run: |
           raw="$(/tmp/oc-bin/node_modules/.bin/opencode --version)"
-          # v1 は "1.19.3"、v2 は "opencode v2.1.0" と表示するので、最後の語から先頭の v を除いて比べる。
-          # v1 in "1.19.3", v2 in "opencode v2.1.0": lấy từ cuối cùng và bỏ chữ v đầu rồi mới so sánh.
-          got="${raw##* }"; got="${got#v}"
           echo "opencode --version: $raw"
-          if [ -n "$WANT" ] && [ "$got" != "$WANT" ]; then echo "expected $WANT"; exit 1; fi
+          case "$raw" in *"$WANT"*) ;; *) echo "expected $WANT"; exit 1 ;; esac
       - run: npm run ${{ matrix.script }}
         env: { OPENCODE_BIN: /tmp/oc-bin/node_modules/.bin/opencode }
       - run: npm run ${{ matrix.pack }}
         env: { OPENCODE_BIN: /tmp/oc-bin/node_modules/.bin/opencode }
 
-  # canary が失敗しても merge は止めないが、誰も気づかないままにならないよう issue を 1 件だけ立てる。
-  # Canary lỗi không chặn merge, nhưng mở đúng một issue để lỗi không trôi qua mà không ai biết.
+  # latest は将来の API 変更を早く知るためのカナリア。別 job にして、失敗が結果として見えるようにする (merge の必須条件にはしない)。
+  # Latest là canary phát hiện sớm thay đổi API; tách job riêng để lỗi hiện ra như một kết quả (không đặt làm điều kiện bắt buộc của merge).
+  canary:
+    needs: check
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { line: v1-latest, pkg: "opencode-ai@latest", script: test:e2e, pack: test:pack }
+          - { line: v2-latest, pkg: "@opencode/cli@latest", script: "test:e2e:v2", pack: "test:pack:v2" }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - uses: oven-sh/setup-bun@v2
+      - run: npm install
+      - run: npm run build
+      - run: npm install --prefix /tmp/oc-bin ${{ matrix.pkg }}
+      - run: /tmp/oc-bin/node_modules/.bin/opencode --version
+      - run: npm run ${{ matrix.script }}
+        env: { OPENCODE_BIN: /tmp/oc-bin/node_modules/.bin/opencode }
+      - run: npm run ${{ matrix.pack }}
+        env: { OPENCODE_BIN: /tmp/oc-bin/node_modules/.bin/opencode }
+
+  # 定期実行で canary が失敗したら、誰も気づかないままにならないよう issue を 1 件だけ立てる。
+  # Khi canary lỗi trong lần chạy theo lịch thì mở đúng một issue để lỗi không trôi qua mà không ai biết.
   canary-report:
-    needs: e2e
-    if: ${{ always() && needs.e2e.result == 'failure' && github.event_name == 'schedule' }}
+    needs: canary
+    if: ${{ always() && needs.canary.result == 'failure' && github.event_name == 'schedule' }}
     runs-on: ubuntu-latest
     permissions:
       issues: write
     steps:
       - env:
           GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
-          open="$(gh issue list --repo "${{ github.repository }}" --label canary --state open --json number --jq 'length')"
+          gh label create canary --repo "$REPO" --color FBCA04 --description "weekly check against the newest opencode" || true
+          open="$(gh issue list --repo "$REPO" --label canary --state open --json number --jq 'length')"
           if [ "$open" = "0" ]; then
-            gh issue create --repo "${{ github.repository }}" --label canary --title "Weekly canary failed on a newer opencode" --body "A scheduled run failed: $RUN_URL"
+            gh issue create --repo "$REPO" --label canary --title "Weekly canary failed on a newer opencode" --body "A scheduled run failed: $RUN_URL"
           fi

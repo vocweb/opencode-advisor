@@ -1,3 +1,4 @@
+import { claimLoad, releaseLoad } from "./load-guard.ts"
 import fs from "node:fs"
 import path from "node:path"
 import { COMMAND_DESCRIPTION } from "../../commands.ts"
@@ -51,10 +52,6 @@ function makeLogger(): Logger {
   }
 }
 
-// 同じ project を二重に読み込まないための目印。plugin の cleanup で外す。
-// Đánh dấu để không nạp hai lần cùng một project; được gỡ trong cleanup của plugin.
-const LOADED = new Set<string>()
-
 // symlink や大文字小文字の違いで同じ directory を別物と見なさないよう、実体のパスに揃えて比べる。
 // Quy về đường dẫn thật trước khi so sánh để symlink hay khác biệt hoa thường không làm hai directory giống nhau thành khác nhau.
 function normalizeDir(p: string): string {
@@ -67,23 +64,34 @@ function normalizeDir(p: string): string {
 
 /** The plugin for opencode 2.x. Everything outside this module is shared with 1.x through AdvisorCore. */
 export async function setupV2(ctx: V2Ctx): Promise<(() => void) | void> {
-  const log = makeLogger()
   const directory = String(ctx.location.directory)
   // 同じ directory に plugin が二重に読み込まれると review が二重になる。先に読み込まれた方だけを動かす。
   // Nếu plugin bị nạp hai lần cho cùng một directory thì review sẽ chạy đôi; chỉ để bản nạp trước hoạt động.
   const loadKey = normalizeDir(directory)
-  if (LOADED.has(loadKey)) {
-    log("warn", `the advisor is already loaded for ${directory} (listed twice in the plugin config?); ignoring the second load`)
+  if (!claimLoad(loadKey)) {
+    makeLogger()("warn", `the advisor is already loaded for ${directory} (listed twice in the plugin config?); ignoring the second load`)
     return
   }
-  LOADED.add(loadKey)
+  try {
+    const cleanup = await startV2(ctx, directory, loadKey)
+    // 無効化などで cleanup が無いときは、再度の読み込みができるよう目印を外す。
+    // Khi không có cleanup (ví dụ plugin bị tắt) thì gỡ dấu để lần nạp sau vẫn chạy được.
+    if (!cleanup) releaseLoad(loadKey)
+    return cleanup
+  } catch (e) {
+    releaseLoad(loadKey)
+    throw e
+  }
+}
+
+async function startV2(ctx: V2Ctx, directory: string, loadKey: string): Promise<(() => void) | void> {
+  const log = makeLogger()
   const worktree = ctx.location.project?.directory ? String(ctx.location.project.directory) : undefined
   const sameDir = (d: string | undefined): boolean => d !== undefined && normalizeDir(d) === loadKey
   const cfg = loadConfig({ directory, worktree })
   for (const w of cfg.warnings) log("warn", w)
   if (!cfg.enabled) {
     log("info", "advisor disabled by configuration")
-    LOADED.delete(loadKey)
     return
   }
   const version = String(ctx.app?.version ?? "unknown")
@@ -371,7 +379,7 @@ export async function setupV2(ctx: V2Ctx): Promise<(() => void) | void> {
 
   log("info", "advisor ready", { host: "v2", version, advisors: specs.map((s) => ({ name: s.name, enabled: s.enabled, model: s.model ?? null, tools: s.tools })) })
   return () => {
-    LOADED.delete(loadKey)
+    releaseLoad(loadKey)
     stop.abort()
     dropPermissionTimers()
     core.stop()
