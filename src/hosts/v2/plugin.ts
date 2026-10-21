@@ -117,6 +117,9 @@ export async function setupV2(ctx: V2Ctx): Promise<(() => void) | void> {
     }
   })
 
+  // /advisor は補助機能。command の API が変わっても review 本体は動かし続ける。
+  // /advisor là phần phụ; nếu API command đổi thì phần review chính vẫn phải chạy.
+  try {
   await ctx.command.transform((editor: any) => {
     editor.add({
       name: "advisor",
@@ -141,6 +144,9 @@ export async function setupV2(ctx: V2Ctx): Promise<(() => void) | void> {
       },
     })
   })
+  } catch (e) {
+    log("warn", "could not register the /advisor command", { error: errMessage(e) })
+  }
 
   // ------------------------------------------------------------------ hooks around the model call
   // step の終了は、イベントと次のモデル呼び出しの hook のどちらが先に届くか分からない。assistant の id で重複を除いて 1 回だけ通知する。

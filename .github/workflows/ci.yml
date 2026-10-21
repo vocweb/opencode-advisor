@@ -1,0 +1,43 @@
+name: ci
+on:
+  push:
+  pull_request:
+  schedule:
+    - cron: "0 3 * * 1"
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - uses: oven-sh/setup-bun@v2
+      - run: npm install
+      - run: npm run check
+
+  e2e:
+    needs: check
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # 固定版 (v1 / v2) は回帰ゲート、latest は将来の API 変更を早く検知するカナリア。
+          # Bản ghim (v1 / v2) là cổng hồi quy; latest là canary để phát hiện sớm thay đổi API tương lai.
+          - { line: v1, pkg: "opencode-ai@1.19.3", script: test:e2e, pack: test:pack }
+          - { line: v2, pkg: "@opencode/cli@2.1.0", script: "test:e2e:v2", pack: "test:pack:v2" }
+          - { line: v2-latest, pkg: "@opencode/cli@latest", script: "test:e2e:v2", pack: "test:pack:v2", canary: true }
+    continue-on-error: ${{ matrix.canary == true }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - uses: oven-sh/setup-bun@v2
+      - run: npm install
+      - run: npm run build
+      - run: npm install --prefix /tmp/oc-bin ${{ matrix.pkg }}
+      - run: npm run ${{ matrix.script }}
+        env: { OPENCODE_BIN: /tmp/oc-bin/node_modules/.bin/opencode }
+      - run: npm run ${{ matrix.pack }}
+        env: { OPENCODE_BIN: /tmp/oc-bin/node_modules/.bin/opencode }
