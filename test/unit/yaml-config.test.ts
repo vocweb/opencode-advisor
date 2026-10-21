@@ -197,3 +197,15 @@ test("util: a prototype key is not a thinking level", async () => {
   const { parseModelSelector } = await import("../../src/util.ts")
   assert.deepEqual(parseModelSelector("p/m:constructor"), { ref: { providerID: "p", modelID: "m:constructor" } })
 })
+
+test("config: the published docs/example/WATCHDOG.yml loads cleanly with its documented shape", () => {
+  const home = tmp()
+  const proj = path.join(home, "p")
+  write(path.join(proj, ".opencode/WATCHDOG.yml"), fs.readFileSync(new URL("../../docs/example/WATCHDOG.yml", import.meta.url), "utf8"))
+  const c = load(home, proj)
+  assert.deepEqual(c.warnings, [])
+  assert.deepEqual(c.advisors.map((a) => a.name), ["PlanFidelity", "SecurityWatch", "LaravelBECheck", "NuxtFECheck", "PlanClarifier"])
+  assert.equal(c.advisors[0]!.enabled, false)
+  assert.deepEqual(c.advisors[1]!.tools, ["read", "grep"])
+  assert.ok(c.advisors[4]!.instructions.includes("CẦN LÀM RÕ"), "the trigger phrase the DEV writes must stay verbatim")
+})
