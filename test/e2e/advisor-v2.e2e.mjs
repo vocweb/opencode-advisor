@@ -734,5 +734,30 @@ await scenario("strict: /advisor status says which advisor the primary is waitin
   }
 })
 
+await scenario("loop guard: an advisor repeating the same call is reminded on the 3rd, stopped on the 4th, without a failure or a fallback", async (check) => {
+  const env = await makeEnvV2({ advisor: { model: "mock/adv", immuneTurns: 0, reviewTimeoutMs: 30000, maxConsecutiveFailures: 1, retry: { fallbackChains: { advisor: ["mock/alt"] }, maxDelayMs: 600000 } } })
+  try {
+    const again = () => ({ toolCalls: [{ name: "grep", args: { pattern: "needle", path: env.oc.dir } }] })
+    env.st.advisorPlan = again
+    env.st.afterTools = again // 結果を受け取った後も同じ呼び出しを繰り返す / sau khi nhận kết quả vẫn lặp lại cùng một lệnh gọi
+    const s = await env.newSession("loop")
+    await env.run(s.id, "hello")
+    await env.settle(3000, 30000)
+    const reqs = env.advisorReqs()
+    // 1 review あたり: 最初の prompt + 最大 4 回の呼び出し + 打ち切り後の 1 回。review が複数回起きても、1 回ごとに有限であること。
+    // Mỗi review: prompt đầu + tối đa 4 lần gọi + 1 lần sau khi bị dừng; dù có nhiều review thì mỗi review đều hữu hạn.
+    const reviews = env.reviewStarts().length
+    check("every review ends after a handful of requests", reviews >= 1 && reqs.length >= 3 && reqs.length <= reviews * 6, [reviews, reqs.length])
+    const results = reqs.flatMap((r) => r.messages.filter((m) => m.role === "tool").map((m) => JSON.stringify(m.content))).join("\n")
+    check("the model was told it is repeating itself", /exact call/.test(results), results.slice(-300))
+    check("only the primary-chosen model was used (no fallback)", reqs.every((r) => r.model === "adv"), reqs.map((r) => r.model))
+    const st = await env.command(s.id, "status")
+    check("the advisor is not halted by it", !/halted|failed/.test(st), st.slice(0, 500))
+    check("the primary was not affected", /plain reply/.test(JSON.stringify((await env.transcript(s.id)).filter((m) => m.type === "assistant").at(-1))))
+  } finally {
+    await env.stop()
+  }
+})
+
 process.exitCode = R.summary() ? 1 : 0
 process.exit(process.exitCode)

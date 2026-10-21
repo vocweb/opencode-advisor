@@ -2,6 +2,7 @@ import { control, type CommandCtx } from "./commands.ts"
 import type { AdvisorConfig, AdvisorSpec } from "./config.ts"
 import { Delivery } from "./delivery.ts"
 import type { Host } from "./host.ts"
+import type { LoopVerdict } from "./loopguard.ts"
 import { agentNameFor } from "./policy.ts"
 import { renderAdvisories } from "./prompts.ts"
 import { Registry } from "./registry.ts"
@@ -274,6 +275,11 @@ export class AdvisorCore {
     if (waiting.length === 0) return
     await Promise.all(waiting.map((r) => r.waitCaughtUp(r.spec.syncBacklog, this.delivery.abortSignal(id))))
     await this.delivery.flushNow(id, true)
+  }
+
+  /** Loop guard entry point for both hosts: the verdict for one investigative tool call of an advisor session. */
+  advisorToolCall(advisorSessionID: string, tool: string, args: unknown): LoopVerdict {
+    return this.registry.reviews.get(advisorSessionID)?.onToolCall(tool, args) ?? "ok"
   }
 
   /** Non-interrupting notes waiting for the next model call, rendered as one block; undefined when there are none. */

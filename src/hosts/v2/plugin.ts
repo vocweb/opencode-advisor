@@ -5,20 +5,21 @@ import { COMMAND_DESCRIPTION } from "../../commands.ts"
 import { loadConfig } from "../../config.ts"
 import { AdvisorCore } from "../../core.ts"
 import type { Logger } from "../../host.ts"
+import { LOOP_REMINDER, LOOP_STOPPED } from "../../loopguard.ts"
 import { agentNameFor, EVICTED, isEvictableTool, scrubSecretOutput } from "../../policy.ts"
 import { redact } from "../../redact.ts"
 import { ADVISE_TOOL_DESCRIPTION, buildAdvisorSystemPrompt, PRIMARY_EXPLAINER } from "../../prompts.ts"
 import { ensureStarterConfig } from "../../setup.ts"
 import { SELF_MARK } from "../../types.ts"
 import { errMessage } from "../../util.ts"
-import { createV2Host, type V2Ctx } from "./host.ts"
+import { createV2Host, type LooseCtx, type V2Ctx } from "./host.ts"
 import { advisorRules, type V2Rule } from "./permission.ts"
 
 const TESTED_WITH = "2.1"
 
 // setup が必須とする v2 のメンバー。1 つでも欠けたら動かさず、何が欠けたかを必ず log に残す。
 // Các thành viên v2 mà setup bắt buộc; thiếu một cái là không chạy, nhưng luôn ghi log cái nào thiếu.
-const REQUIRED_MEMBERS: [string, (c: V2Ctx) => unknown][] = [
+const REQUIRED_MEMBERS: [string, (c: LooseCtx) => unknown][] = [
   ["location", (c) => c.location],
   ["session.hook", (c) => c.session?.hook],
   ["session.context", (c) => c.session?.context],
@@ -30,7 +31,7 @@ const REQUIRED_MEMBERS: [string, (c: V2Ctx) => unknown][] = [
   ["agent.transform", (c) => c.agent?.transform],
 ]
 
-export function missingV2Members(ctx: V2Ctx | undefined): string[] {
+export function missingV2Members(ctx: LooseCtx | undefined): string[] {
   return REQUIRED_MEMBERS.filter(([name, get]) => {
     const v = ctx ? get(ctx) : undefined
     return name === "location" ? !v : typeof v !== "function"
@@ -38,7 +39,7 @@ export function missingV2Members(ctx: V2Ctx | undefined): string[] {
 }
 
 /** opencode 1.x also calls `setup` with a partial context; this tells whether `ctx` at least looks like a 2.x one. */
-export function looksLikeV2(ctx: V2Ctx | undefined): boolean {
+export function looksLikeV2(ctx: LooseCtx | undefined): boolean {
   return !!ctx && (!!ctx.location || typeof ctx.session?.hook === "function" || typeof ctx.event?.subscribe === "function" || String(ctx.app?.version ?? "").startsWith("2"))
 }
 
@@ -252,7 +253,7 @@ async function startV2(ctx: V2Ctx, directory: string, loadKey: string): Promise<
   )
   // 要約やタイトル生成などの補助リクエストにも advise を見せない。
   // Không để các request phụ (tóm tắt, tạo tiêu đề) thấy tool advise.
-  for (const kind of ["compaction", "generate"]) {
+  for (const kind of ["compaction", "generate", "title"] as const) {
     hooks.push(
       ctx.session.hook(kind, (ev: any) => {
         if (!String(ev.agent ?? "").startsWith("advisor-")) delete ev.tools?.advise
@@ -265,6 +266,15 @@ async function startV2(ctx: V2Ctx, directory: string, loadKey: string): Promise<
       if (!core.isAdvisorSession(sid)) return
       const proposed = ev.decision?.retry ? Number(ev.decision.delay ?? 0) : 0
       if (core.stopRetrying(sid, { attempt: Number(ev.attempt ?? 1), message: `${ev.error?.type ?? ""} ${ev.error?.message ?? ""}`, waitMs: proposed })) ev.decision = { retry: false }
+    }),
+  )
+  hooks.push(
+    ctx.tool.hook("execute.before", (ev) => {
+      const sid = String(ev.sessionID)
+      if (!core.isAdvisorSession(sid)) return
+      const verdict = core.advisorToolCall(sid, ev.tool, ev.input)
+      if (verdict === "remind") throw new Error(LOOP_REMINDER)
+      if (verdict === "abort") throw new Error(LOOP_STOPPED)
     }),
   )
   // 一部のフックが将来の版で変わっても、他の機能は動かし続ける。
@@ -292,9 +302,9 @@ async function startV2(ctx: V2Ctx, directory: string, loadKey: string): Promise<
         permissionTimers.delete(id)
         const what = `${String(d.action ?? "tool")} ${String(d.resources?.[0] ?? "")}`.trim()
         log("warn", "advisor permission request timed out; rejected", { sessionID, permission: id, what })
-        // 2.1.0 の実装は `decision`、ドキュメントは `reply`。どちらの版でも通るよう両方を送る。
-        // Bản 2.1.0 dùng `decision` còn tài liệu ghi `reply`; gửi cả hai để chạy được ở cả hai phiên bản.
-        Promise.resolve(ctx.permission.reply({ sessionID, requestID: id, decision: "reject", reply: "reject" })).catch((e) => log("warn", "could not reject an advisor permission request", { error: errMessage(e) }))
+        // 型定義 (2.1.1) の入力は `decision` だけ。ドキュメントの `reply` は型に無いので送らない。
+        // Kiểu của 2.1.1 chỉ có `decision`; `reply` trong tài liệu không có trong kiểu nên không gửi.
+        Promise.resolve(ctx.permission.reply({ sessionID, requestID: id, decision: "reject" })).catch((e) => log("warn", "could not reject an advisor permission request", { error: errMessage(e) }))
       }, cfg.permissionTimeoutMs),
     })
   }

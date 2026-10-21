@@ -7,6 +7,7 @@ import { EmissionGuard, isSeverity } from "./guard.ts"
 import { buildUpdatePrompt } from "./prompts.ts"
 import type { Registry, ReviewCtx } from "./registry.ts"
 import { isSelfMessage, renderDelta, type RenderOptions } from "./render.ts"
+import { LoopGuard } from "./loopguard.ts"
 import { screenNote } from "./safety.ts"
 import { ADVISOR_TITLE_PREFIX, type ModelRef, type Msg, type Note, type Severity } from "./types.ts"
 import { clip, errMessage, parseModelSelector, sleep } from "./util.ts"
@@ -44,6 +45,9 @@ const MAX_ATTEMPTS = 3
 const SYNC_WAIT_CAP_MS = 30_000
 // プロバイダのエラー名を保持し、利用上限や拒否を分類できるようにする。
 // Giữ tên lỗi của provider để phân loại (usage limit, refusal, ...).
+/** The review was stopped by the loop guard: not a failure, so it neither counts toward halting nor triggers a fallback. */
+class LoopStopped extends Error {}
+
 class ReviewError extends Error {
   constructor(
     message: string,
@@ -113,6 +117,7 @@ export class AdvisorRuntime {
   private usageSeen = new Set<string>()
   private abort: AbortController | undefined
   private retryAbort: string | undefined
+  private loopStopped = false
   private readonly guard: EmissionGuard
 
   constructor(private deps: RuntimeDeps) {
@@ -374,6 +379,15 @@ export class AdvisorRuntime {
         return
       } catch (e) {
         if (this.disposed) return
+        if (e instanceof LoopStopped) {
+          // 失敗として数えず、fallback にも回さない。この batch は諦めて次の update から新しい review を始める。
+          // Không tính là lỗi và không chuyển fallback; bỏ batch này và để update kế tiếp bắt đầu review mới.
+          this.deps.log("warn", "advisor review stopped by the loop guard", { advisor: this.spec.name })
+          this.needsReprime = true
+          this.dropBatch(covered)
+          if (this.status === "reviewing") this.status = this.paused ? "paused" : "idle"
+          return
+        }
         const { cfg, log } = this.deps
         this.stats.failures++
         this.lastError = errMessage(e)
@@ -519,6 +533,8 @@ export class AdvisorRuntime {
     const advisorSession = await this.ensureSession()
     const reviewId = ++this.reviewSeq
     this.guard.beginReview()
+    const loop = new LoopGuard()
+    this.loopStopped = false
     const ctx: ReviewCtx = {
       advisorSessionID: advisorSession,
       reviewId,
@@ -527,6 +543,14 @@ export class AdvisorRuntime {
       notes: [],
       quarantined: 0,
       handleAdvise: (args) => this.handleAdvise(ctx, args),
+      onToolCall: (tool, args) => {
+        const verdict = loop.observe(tool, args)
+        if (verdict === "abort" && !this.loopStopped) {
+          this.loopStopped = true
+          host.abort(advisorSession).catch(() => {})
+        }
+        return verdict
+      },
     }
     registry.reviews.set(advisorSession, ctx)
 
@@ -549,6 +573,12 @@ export class AdvisorRuntime {
     const retryWhy = this.retryAbort
     this.retryAbort = undefined
     if (this.disposed) return
+    // ループ検知で止めた review は失敗ではない。中断された prompt の error は無視して、専用の例外で runBatch に伝える。
+    // Review bị loop guard dừng không phải thất bại; bỏ qua error của prompt bị ngắt và báo cho runBatch bằng một ngoại lệ riêng.
+    if (this.loopStopped) {
+      this.loopStopped = false
+      throw new LoopStopped()
+    }
     // 中断した prompt は error なしで戻ることがある。成功と取り違えないよう先に失敗として扱う。
     // prompt bị ngắt có thể trả về mà không có error; phải coi là thất bại trước, kẻo nhầm với thành công.
     if (retryWhy !== undefined) throw new ReviewError(`provider kept failing and was not worth waiting for: ${retryWhy}`, "ProviderRetry", false)

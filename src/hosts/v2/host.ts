@@ -1,11 +1,16 @@
+import type { Plugin } from "@opencode/plugin"
 import type { AdvisorChild, DeliverMode, DeliverOptions, Host, Logger, PromptInput, PromptResult } from "../../host.ts"
 import { renderAdvisories } from "../../prompts.ts"
 import { ADVISOR_TITLE_PREFIX, SELF_MARK, type Msg, type Note } from "../../types.ts"
 import { lastAssistant, normalizeTranscript } from "./normalize.ts"
 
-// プラグイン文脈 (ctx) は実行時に型なしで受け取る。使うメンバーだけを緩く書き、足りなければ呼び出し側が検出する。
-// ctx của plugin v2 nhận lúc chạy không có kiểu; chỉ mô tả lỏng các thành viên cần dùng, thiếu thì nơi gọi phát hiện.
-export type V2Ctx = Record<string, any>
+// 型は @opencode/plugin のものを使う (型だけの import で、実行時には読み込まない)。API が変わると tsc が検出する。
+// Dùng kiểu của @opencode/plugin (chỉ import kiểu, không nạp lúc chạy) để tsc phát hiện khi API đổi.
+export type V2Ctx = Plugin.Context
+
+// 実行時に届く ctx は v1 の部分的なものかもしれないので、判定の段階では緩い型で扱う。
+// ctx nhận lúc chạy có thể là bản thiếu của v1, nên ở bước nhận diện dùng kiểu lỏng.
+export type LooseCtx = Record<string, any>
 
 // host に提供される toast API は無い。TUI プラグインが入るまでは log だけにする。
 // Server plugin v2 không có API toast; tới khi có plugin TUI thì chỉ ghi log.
@@ -93,7 +98,7 @@ export function createV2Host(ctx: V2Ctx, log: Logger): Host {
     },
 
     async abort(id) {
-      await session.interrupt({ sessionID: id, continue: false })
+      await session.interrupt({ sessionID: id, resume: false })
     },
 
     async advisorChildren(primaryID): Promise<AdvisorChild[]> {

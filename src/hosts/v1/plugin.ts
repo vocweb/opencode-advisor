@@ -3,6 +3,7 @@ import { COMMAND_DESCRIPTION } from "../../commands.ts"
 import { loadConfig } from "../../config.ts"
 import { AdvisorCore } from "../../core.ts"
 import type { Logger } from "../../host.ts"
+import { LOOP_REMINDER, LOOP_STOPPED } from "../../loopguard.ts"
 import { agentNameFor, evictStaleResults, scrubInvestigationResults } from "../../policy.ts"
 import { ADVISE_TOOL_DESCRIPTION, buildAdvisorSystemPrompt, PRIMARY_EXPLAINER } from "../../prompts.ts"
 import { ensureStarterConfig } from "../../setup.ts"
@@ -236,6 +237,15 @@ export async function createV1Hooks(input: PluginInput): Promise<Hooks> {
       pendingControl.delete(i.sessionID)
       if (Date.now() - p.at > CONTROL_TTL_MS) return
       o.text = p.text
+    },
+
+    // advisor が同じ調査ツールを同じ引数で繰り返したら注意し、さらに繰り返せば review を打ち切る。throw した内容はモデルにツールエラーとして見える。
+    // Khi advisor lặp lại cùng tool và tham số thì nhắc, lặp nữa thì dừng review; nội dung ném ra hiện cho model như lỗi của tool.
+    "tool.execute.before": async (i, o) => {
+      if (!core.isAdvisorSession(i.sessionID)) return
+      const verdict = core.advisorToolCall(i.sessionID, i.tool, o.args)
+      if (verdict === "remind") throw new Error(LOOP_REMINDER)
+      if (verdict === "abort") throw new Error(LOOP_STOPPED)
     },
 
     "experimental.chat.messages.transform": async (_i, o) => {
