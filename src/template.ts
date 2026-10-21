@@ -28,6 +28,7 @@ advisor:
   reviewTimeoutMs: 300000
   maxConsecutiveFailures: 3 # dropped review batches in a row before the advisor halts
   toast: true
+  permissionTimeoutMs: 120000 # reject an advisor's tool permission request nobody answers
   includeReasoning: true
 
 retry:

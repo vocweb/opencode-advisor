@@ -1,19 +1,20 @@
 import type { AdvisorConfig, AdvisorSpec, SyncBacklog } from "./config.ts"
 import { computeDelta, currentTurnCursor, cursorBefore, tailCursor } from "./delta.ts"
-import { unwrap, type Delivery, type Logger } from "./delivery.ts"
+import type { Delivery } from "./delivery.ts"
 import { classifyFailure, ModelChain } from "./fallback.ts"
+import type { Host, Logger, PromptResult } from "./host.ts"
 import { EmissionGuard, isSeverity } from "./guard.ts"
 import { buildUpdatePrompt } from "./prompts.ts"
 import type { Registry, ReviewCtx } from "./registry.ts"
 import { isSelfMessage, renderDelta, type RenderOptions } from "./render.ts"
 import { screenNote } from "./safety.ts"
-import { ADVISOR_TITLE_PREFIX, type Client, type ModelRef, type Msg, type Note, type Severity } from "./types.ts"
+import { ADVISOR_TITLE_PREFIX, type ModelRef, type Msg, type Note, type Severity } from "./types.ts"
 import { clip, errMessage, parseModelSelector, sleep } from "./util.ts"
 
 export type RuntimeStatus = "idle" | "reviewing" | "paused" | "no_model" | "failed" | "quota_paused"
 
 export interface RuntimeDeps {
-  client: Client
+  host: Host
   cfg: AdvisorConfig
   spec: AdvisorSpec
   registry: Registry
@@ -109,6 +110,7 @@ export class AdvisorRuntime {
   private deferred: Note[] = []
   private usageSeen = new Set<string>()
   private abort: AbortController | undefined
+  private retryAbort: string | undefined
   private readonly guard: EmissionGuard
 
   constructor(private deps: RuntimeDeps) {
@@ -179,6 +181,7 @@ export class AdvisorRuntime {
   /** Forget the advisor's context and failure state; the next review re-primes from the recent transcript. */
   reset(): void {
     this.needsReprime = true
+    this.retryAbort = undefined
     this.droppedCycles = 0
     this.quarantineStreak = 0
     this.lastError = undefined
@@ -196,10 +199,11 @@ export class AdvisorRuntime {
 
   dispose(): void {
     this.disposed = true
+    this.retryAbort = undefined
     this.abort?.abort()
     this.wake()
     const id = this.advisorSessionID
-    if (id) this.deps.client.session.abort({ path: { id } }).catch(() => {})
+    if (id) this.deps.host.abort(id).catch(() => {})
   }
 
   private wake(): void {
@@ -228,6 +232,23 @@ export class AdvisorRuntime {
         signal.addEventListener("abort", done, { once: true })
       })
     }
+  }
+
+  // opencode は 429/5xx を自分で再試行し続け、prompt が戻らない。待つ価値がなければここで中断して fallback に回す。
+  // opencode tự retry 429/5xx mãi nên prompt không trả về; nếu chờ không đáng thì ngắt ở đây để chuyển sang fallback.
+  onRetryStatus(status: { attempt: number; message: string; next: number }): void {
+    if (!this.abort || this.retryAbort !== undefined || !this.advisorSessionID) return
+    if (!this.shouldStopRetrying({ attempt: status.attempt, message: status.message, waitMs: status.next - Date.now() })) return
+    this.retryAbort = status.message
+    this.deps.host.abort(this.advisorSessionID).catch(() => {})
+  }
+
+  // provider の再試行を打ち切るべきか。fallback に移れる、待ち時間が長すぎる、試行回数が多すぎる、のどれか。
+  // Có nên dừng việc provider retry không: khi chuyển được sang fallback, chờ quá lâu, hoặc đã thử quá nhiều lần.
+  shouldStopRetrying(r: { attempt: number; message: string; waitMs: number }): boolean {
+    const maxDelay = this.deps.cfg.retry.maxDelayMs
+    const tooLong = maxDelay > 0 && r.waitMs > maxDelay
+    return this.chain.wouldSwitch(classifyFailure("", r.message)) || tooLong || r.attempt > MAX_ATTEMPTS
   }
 
   /** Account cost/tokens of an advisor assistant message (called from the event stream). */
@@ -407,25 +428,28 @@ export class AdvisorRuntime {
   }
 
   private async fetchMessages(): Promise<Msg[]> {
-    const { client, cfg, primaryID } = this.deps
-    return unwrap<Msg[]>(await client.session.messages({ path: { id: primaryID }, query: { limit: cfg.fetchLimit } }))
+    const { host, cfg, primaryID } = this.deps
+    return host.transcript(primaryID, cfg.fetchLimit)
   }
 
   private async ensureSession(): Promise<string> {
     if (this.advisorSessionID) return this.advisorSessionID
-    const { client, registry, primaryID } = this.deps
+    const { host, registry, primaryID } = this.deps
     this.generation++
     const title = `${ADVISOR_TITLE_PREFIX} ${this.spec.name}${this.generation > 1 ? ` #${this.generation}` : ""}`
-    const created = unwrap<{ id: string }>(await client.session.create({ body: { parentID: primaryID, title } }))
-    registry.advisorSessions.add(created.id)
-    registry.owners.set(created.id, this)
-    registry.meta.set(created.id, { parentID: primaryID, title })
-    this.advisorSessionID = created.id
-    return created.id
+    const id = await host.createAdvisorSession({ parentID: primaryID, title, name: this.spec.name, agent: this.deps.agentName })
+    registry.advisorSessions.add(id)
+    registry.owners.set(id, this)
+    registry.meta.set(id, { parentID: primaryID, title })
+    this.advisorSessionID = id
+    return id
   }
 
   private async review(final: boolean): Promise<void> {
-    const { client, cfg, registry, log, primaryID } = this.deps
+    const { host, cfg, registry, log, primaryID } = this.deps
+    // 前回の中断フラグが残らないように、毎回の review の先頭で消す。
+    // Xóa cờ ngắt của lần trước ở đầu mỗi review để nó không bị sót sang lần này.
+    this.retryAbort = undefined
     const msgs = await this.fetchMessages()
 
     const model = this.resolveModel(msgs)
@@ -493,31 +517,27 @@ export class AdvisorRuntime {
     this.abort = ac
     const timer = setTimeout(() => {
       ac.abort()
-      client.session.abort({ path: { id: advisorSession } }).catch(() => {})
+      host.abort(advisorSession).catch(() => {})
     }, cfg.reviewTimeoutMs)
 
-    let info: any
+    let result: PromptResult
     try {
-      const data = unwrap<{ info?: any }>(
-        await client.session.prompt({
-          path: { id: advisorSession },
-          body: { agent: this.deps.agentName, model: model.ref, parts: [{ type: "text", text }] },
-          signal: ac.signal,
-        } as any),
-      )
-      info = data?.info
+      result = await host.promptAdvisor(advisorSession, { agent: this.deps.agentName, model: model.ref, ...(model.level ? { level: model.level } : {}), text, signal: ac.signal })
     } finally {
       clearTimeout(timer)
       this.abort = undefined
       registry.reviews.delete(advisorSession)
     }
+    const retryWhy = this.retryAbort
+    this.retryAbort = undefined
     if (this.disposed) return
-
-    if (info?.error) {
-      const name = String(info.error.name ?? "Error")
-      const msg = `${name}: ${info.error.data?.message ?? ""}`.trim()
+    // 中断した prompt は error なしで戻ることがある。成功と取り違えないよう先に失敗として扱う。
+    // prompt bị ngắt có thể trả về mà không có error; phải coi là thất bại trước, kẻo nhầm với thành công.
+    if (retryWhy !== undefined) throw new ReviewError(`provider kept failing and was not worth waiting for: ${retryWhy}`, "ProviderRetry", false)
+    if (result.error) {
+      const { name, message, permanent } = result.error
       if (name === "MessageAbortedError") throw new Error(`advisor review timed out after ${cfg.reviewTimeoutMs}ms or was aborted`)
-      throw new ReviewError(msg, name, name === "ProviderAuthError")
+      throw new ReviewError(`${name}: ${message}`.trim(), name, permanent === true)
     }
 
     // Success: the advisor has absorbed this delta.
@@ -525,9 +545,8 @@ export class AdvisorRuntime {
     this.reprimed = false
     this.droppedCycles = 0
     this.lastError = undefined
-    this.chain.onSuccess()
     this.stats.reviews++
-    this.recordUsage(info ?? { id: `r${reviewId}` })
+    this.recordUsage({ id: result.id ?? `r${reviewId}`, cost: result.cost, tokens: result.tokens })
 
     this.quarantineStreak = ctx.quarantined > 0 ? this.quarantineStreak + 1 : 0
     if (this.quarantineStreak >= 2) {
@@ -539,7 +558,7 @@ export class AdvisorRuntime {
     }
 
     // Keep the advisor's own context bounded: re-prime on the next review once it grows too large.
-    const t = info?.tokens
+    const t = result.tokens
     const ctxTokens = (t?.input ?? 0) + (t?.cache?.read ?? 0) + (t?.cache?.write ?? 0) + (t?.output ?? 0)
     this.stats.contextTokens = ctxTokens
     this.sessionReviews++
@@ -567,6 +586,6 @@ export class AdvisorRuntime {
 
   private toast(message: string, variant: "info" | "warning" | "error"): void {
     if (!this.deps.cfg.toast) return
-    this.deps.client.tui.showToast({ body: { title: "Advisor", message, variant, duration: 10_000 } }).catch(() => {})
+    this.deps.host.toast(message, variant)
   }
 }

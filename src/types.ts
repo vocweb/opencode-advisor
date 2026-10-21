@@ -1,7 +1,3 @@
-import type { PluginInput } from "@opencode-ai/plugin"
-import type { Message, Part } from "@opencode-ai/sdk"
-
-export type Client = PluginInput["client"]
 
 export type Severity = "nit" | "concern" | "blocker"
 
@@ -14,10 +10,57 @@ export interface ModelRef {
   modelID: string
 }
 
-/** One message of a session transcript as returned by `client.session.messages`. */
+// opencode のバージョンに依存しない会話の型。host ごとの正規化関数がここに揃える。
+// Kiểu transcript không phụ thuộc phiên bản opencode; mỗi host chuẩn hóa message của nó về đây.
+export interface TokenUsage {
+  input: number
+  output: number
+  reasoning?: number
+  cache?: { read: number; write: number }
+}
+
+export interface MsgInfo {
+  id: string
+  role: "user" | "assistant"
+  sessionID?: string
+  agent?: string
+  /** assistant: the agent that produced it (v1 `mode`). */
+  mode?: string
+  model?: ModelRef
+  providerID?: string
+  modelID?: string
+  parentID?: string
+  time: { created: number; completed?: number }
+  finish?: string
+  summary?: boolean
+  error?: { name: string; data?: { message?: string } }
+  cost?: number
+  tokens?: TokenUsage
+}
+
+export interface ToolState {
+  status: string
+  input?: unknown
+  output?: unknown
+  error?: unknown
+  metadata?: Record<string, unknown>
+}
+
+export interface MsgPart {
+  type: string
+  text?: string
+  ignored?: boolean
+  synthetic?: boolean
+  metadata?: Record<string, unknown>
+  tool?: string
+  state?: ToolState
+  files?: string[]
+  [key: string]: unknown
+}
+
 export interface Msg {
-  info: Message
-  parts: Part[]
+  info: MsgInfo
+  parts: MsgPart[]
 }
 
 export interface Note {

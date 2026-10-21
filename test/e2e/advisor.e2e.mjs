@@ -947,5 +947,57 @@ await scenario("syncBacklog: /advisor itself is never held by a strict wait", as
   }
 })
 
+await scenario("fallback: a retryable 429 does not hang the review; the chain moves to the next model", async (check) => {
+  const env = await makeEnv({
+    advisor: { model: "mock/adv", immuneTurns: 0, reviewTimeoutMs: 60000, retry: { fallbackChains: { advisor: ["mock/alt"] }, maxDelayMs: 600000 } },
+  })
+  try {
+    // opencode retries 429 by itself with growing delays and never returns; the plugin must notice the retry status.
+    env.st.advisorPlan = (ctx) => (ctx.model === "adv" ? { status: 429, body: "Too many requests: rate limit exceeded" } : { text: "No findings." })
+    const s = await env.newSession("retry429")
+    await env.run(s.id, "hello")
+    const t0 = Date.now()
+    await waitFor(() => env.reviewStarts().some((r) => r.model === "alt"), { timeout: 40000, label: "review on the fallback model" }).catch(() => {})
+    check("the review reached the fallback model well before reviewTimeoutMs", env.reviewStarts().some((r) => r.model === "alt"), env.reviewStarts().map((r) => r.model))
+    check("and quickly", Date.now() - t0 < 30000, Date.now() - t0)
+  } finally {
+    await env.stop()
+  }
+})
+
+await scenario("tools: a granted mutating tool follows the user's permission policy (ask, with a timeout) instead of running silently", async (check) => {
+  const fs = await import("node:fs")
+  const path = await import("node:path")
+  for (const policy of ["ask", "allow"]) {
+    const env = await makeEnv({
+      advisor: { model: "mock/adv", immuneTurns: 0, reviewTimeoutMs: 60000, permissionTimeoutMs: 3000, advisors: [{ name: "Fixer", tools: ["read", "write"] }] },
+      extraConfig: policy === "allow" ? { permission: { edit: "allow" } } : {},
+    })
+    try {
+      const target = path.join(env.oc.dir, "advisor-wrote.txt")
+      let wrote = false
+      env.st.advisorPlan = () => {
+        if (!wrote) {
+          wrote = true
+          return { toolCalls: [{ name: "write", args: { filePath: target, content: "by the advisor" } }] }
+        }
+        return { text: "No findings." }
+      }
+      env.st.afterTools = () => ({ text: "No findings." })
+      const s = await env.newSession(`perm-${policy}`)
+      // A plain rejection ends the advisor's turn, so no further model request follows; the review must simply finish.
+      const t0 = Date.now()
+      await env.run(s.id, "hello")
+      await waitFor(async () => /\| Fixer \| idle \|/.test(await env.command(s.id, "status")) && env.reviewStarts().length >= 1, { timeout: 30000, label: "review finished" }).catch(() => {})
+      const finished = /\| Fixer \| idle \|/.test(await env.command(s.id, "status"))
+      const exists = fs.existsSync(target)
+      if (policy === "ask") check("without a user rule the write is not performed silently, and the review ends instead of waiting forever", !exists && finished && Date.now() - t0 < 30000, { exists, finished })
+      else check("with the user's own allow rule the write runs", exists)
+    } finally {
+      await env.stop()
+    }
+  }
+})
+
 process.exitCode = R.summary() ? 1 : 0
 process.exit(process.exitCode)

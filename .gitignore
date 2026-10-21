@@ -2,3 +2,5 @@
 /node_modules
 dist/
 docs/prompt
+# local planning notes
+plans/

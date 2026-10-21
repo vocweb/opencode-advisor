@@ -6,13 +6,21 @@ After each step of the main agent, the advisor reads only the new part of the tr
 
 ## Install
 
-Add the package to `opencode.json`, either the global `~/.config/opencode/opencode.json` or one in your project:
+This plugin runs on opencode 1.19.x and on opencode 2.x (tested on 1.19.3 and 2.1.0). One package serves both: opencode 1 calls its `server` export, opencode 2 calls its `setup` export. Check your version with `opencode --version`.
+
+Add the package to your opencode config, either the global one in `~/.config/opencode/` or one in your project. The key differs by major version:
 
 ```json
 { "plugin": ["@vocweb/opencode-advisor"] }
 ```
 
-opencode installs it on startup. The first time it runs, the plugin creates a starter `~/.config/opencode/WATCHDOG.yml` and shows a toast. Then pick a model from inside opencode:
+```json
+{ "plugins": ["@vocweb/opencode-advisor"] }
+```
+
+The first block is for opencode 1.x (`opencode.json`), the second for opencode 2.x.
+
+opencode installs it on startup. The first time it runs, the plugin creates a starter `~/.config/opencode/WATCHDOG.yml` (and shows a toast on opencode 1.x). Then pick a model from inside opencode:
 
 ```
 /advisor setup anthropic/claude-haiku-4-5
@@ -32,7 +40,7 @@ To stop the plugin from creating the starter file, set `OPENCODE_ADVISOR_NO_SETU
 | Emission guard | Drops empty notes ("LGTM"), duplicates and notes over budget. `immuneTurns` adds a cooldown after a steer, and `maxSteersPerPrompt` stops the advisor and agent from going back and forth forever. |
 | Safety | Advisor output is untrusted. Notes that look like prompt injection, or that suggest destructive commands (`rm -rf`, `curl \| sh`, force-push) not present in the transcript, are rejected. Two rejections in a row reset the advisor's context. |
 | Permissions | The advisor gets `advise` plus `read`, `grep` and `glob` (configurable). Common secret files such as `.env`, keys and credentials are denied. Everything else is denied. |
-| Failure handling | A failing review is retried three times with backoff, then the batch is dropped. After `maxConsecutiveFailures` dropped batches the advisor halts; your main agent is not affected. With `retry.fallbackChains`, a failing model is replaced by the next one. If every model hits its usage limit, the advisor pauses as `quota_paused` and keeps its batch. `/advisor reset` clears both states. Compacting the main session resets the advisor, and an oversized advisor context is rebuilt. |
+| Failure handling | A failing review is retried three times with backoff, then the batch is dropped. After `maxConsecutiveFailures` dropped batches the advisor halts; your main agent is not affected. With `retry.fallbackChains`, a failing model is replaced by the next one. If every model hits its usage limit, the advisor pauses as `quota_paused` and keeps its batch. opencode retries 429 and 5xx answers by itself; the plugin watches those retries and moves to the next model instead of waiting. A refusal by the main advisor model (content filter) pins the advisor to its fallback until its context is rebuilt, for example by a compaction or `/advisor reset`. `/advisor reset` clears both states. Compacting the main session resets the advisor, and an oversized advisor context is rebuilt. |
 
 ## The `/advisor` command
 
@@ -92,12 +100,14 @@ advisors:
 | `advisor.immuneTurns` | 3 | After a steer, later concerns become asides for this many turns. Blockers are not affected |
 | `advisor.continueSeverity` | concern | After a final answer, notes at or above this level wake the agent. Lower ones become cards |
 | `advisor.evictStaleResults` | true | Old `read`, `grep` and `glob` outputs in the advisor's context are replaced by a short stub |
-| `retry.*` | see sample | `enabled`, `modelFallback`, `fallbackOn` (`any`, `usage-limit`, `except-usage-limit`), `fallbackRevertPolicy` (`cooldown-expiry`, `never`), `maxDelayMs` (cooldown for a failing model), `fallbackChains` (keys `advisor`, `provider/model`, `provider/*`; the most specific wins) |
+| `retry.*` | see sample | `enabled`, `modelFallback`, `fallbackOn` (`any`, `usage-limit`, `except-usage-limit`), `fallbackRevertPolicy` (`cooldown-expiry`, `never`), `maxDelayMs` (cooldown for a failing model, and the longest wait for a provider that asks to retry later), `fallbackChains` (keys `advisor`, `provider/model`, `provider/*`; the most specific wins) |
 | `task.agentAdvisor` | none | Maps a subagent name to `on`, `off` or `provider/model`. An agent definition can also set `advisor: true` or `advisor: "provider/model"` |
 | `advisors[]` | one default advisor | `name`, `enabled`, `model`, `tools`, `reviewMode`, `reviewInterval`, `syncBacklog`, `maxNotesPerUpdate`, `instructions` |
-| `advisor.*` plugin extras | | `maxSteersPerPrompt` (6), `contextTokenBudget` (120000), `reviewTimeoutMs` (300000), `maxConsecutiveFailures` (3, counted in dropped batches), `toast`, `explainToPrimary`, `includeReasoning`, `fetchLimit`, `primeMessages`, `primeChars`, `maxMessageChars`, `maxToolInputChars`, `maxToolOutputChars`, `maxEditChars`, `controlModel` |
+| `advisor.*` plugin extras | | `maxSteersPerPrompt` (6), `contextTokenBudget` (120000), `reviewTimeoutMs` (300000), `permissionTimeoutMs` (120000), `maxConsecutiveFailures` (3, counted in dropped batches), `toast`, `explainToPrimary`, `includeReasoning`, `fetchLimit`, `primeMessages`, `primeChars`, `maxMessageChars`, `maxToolInputChars`, `maxToolOutputChars`, `maxEditChars`, `controlModel` |
 
 Tool names follow oh-my-pi: `search` is `grep`, `find` is `glob`, and `write` and `ast_edit` are `edit`. Names with no opencode equivalent (`recall`, `eval`, `debug` and so on) are dropped with a warning. If a list has entries but none are valid, it falls back to `read, grep, glob`. `tools: []` means no investigation tools at all.
+
+A tool that changes files (`edit`, `write`, `bash`, `task`) is only available when you list it in an advisor's `tools`, and it then follows your own permission rules for that tool. If you have no rule, it asks. The question appears in the TUI for the hidden advisor session. If nobody answers within `permissionTimeoutMs`, the request is rejected so the review does not hang. `read`, `grep` and `glob` never ask, and secret files stay denied.
 
 Some oh-my-pi options have no counterpart in opencode. They are accepted and ignored with a warning: `tier.advisor`, usage-aware fallback (`retry.usageAwareFallback`, `usageReserve*`, `waitForUsageReset`), credential rotation, signed-reasoning eviction, Agent Hub, RPC and ACP integration, the TUI editor, and clipboard copy. A `:level` suffix on a model is parsed but ignored, because the opencode SDK has no thinking-level field in its prompt.
 
@@ -114,7 +124,8 @@ Some oh-my-pi options have no counterpart in opencode. They are accepted and ign
 - Config changes other than `/advisor setup`, `enable` and `disable` need an opencode restart.
 - `syncBacklog` can only hold the main agent before its next LLM call, not before it returns its last answer. With `agent-end` and `strict`, the review runs after the final answer, and a note at or above `continueSeverity` then wakes the agent.
 - On shutdown the plugin waits up to 15 seconds for running reviews, but opencode 1.19.3 does not await a plugin's `dispose`. With `opencode run` the process exits about 15 ms after `dispose` starts, so the last review of a headless run is lost. `opencode serve` on SIGTERM does not call `dispose` at all.
-- It is built against the opencode plugin API 1.19.x and uses `experimental.*` hooks that may change. TUI toasts are not covered by the automated tests. Everything else is tested against a real `opencode serve`.
+- opencode 1.x: built against plugin API 1.19.x; it uses `experimental.*` hooks that may change. TUI toasts are not covered by the automated tests.
+- opencode 2.x: advisories are delivered as synthetic messages, so there are no toasts and `/advisor` replies appear in the transcript. Frontmatter `advisor:` on an agent file is not readable through the 2.x plugin API, so use `task.agentAdvisor` in `WATCHDOG.yml` instead (tested). `/advisor` is not available in headless `opencode run`. If a future opencode renames a hook the plugin uses, that feature is skipped with a log line instead of failing the load. Everything is tested against a real `opencode serve` on both lines.
 - A custom agent with `"*": "allow"` can see the `advise` tool. Its calls are rejected.
 
 ## Development
@@ -122,11 +133,13 @@ Some oh-my-pi options have no counterpart in opencode. They are accepted and ign
 ```bash
 npm install
 npm run check      # typecheck, unit tests, build
-npm run test:e2e   # needs the opencode binary: OPENCODE_BIN=/path/to/opencode
-npm run test:pack  # installs the packed tarball through opencode.json and runs a review
+npm run test:e2e      # opencode 1.x; needs OPENCODE_BIN=/path/to/opencode
+npm run test:e2e:v2   # opencode 2.x; needs OPENCODE_BIN=/path/to/opencode
+npm run test:pack     # installs the packed tarball through opencode.json (1.x) and runs a review
+npm run test:pack:v2  # the same through the 2.x "plugins" key
 ```
 
-The E2E suite starts a real `opencode serve` in an isolated sandbox and points it at a scripted OpenAI-compatible mock, so the advisor and agent behave the same on every run. Use opencode 1.19.x for it; 2.x has a different API.
+The E2E suite starts a real `opencode serve` in an isolated sandbox and points it at a scripted OpenAI-compatible mock, so the advisor and agent behave the same on every run. Run the 1.x suite with an opencode 1.19.x binary and the 2.x suite with an opencode 2.x binary.
 
 ## Author
 

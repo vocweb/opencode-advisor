@@ -1,6 +1,6 @@
 import { test } from "node:test"
 import assert from "node:assert/strict"
-import { evictStaleResults } from "../../src/plugin.ts"
+import { evictStaleResults } from "../../src/policy.ts"
 import { renderAdvisories, renderAdvisory } from "../../src/prompts.ts"
 import type { Msg, Note } from "../../src/types.ts"
 
