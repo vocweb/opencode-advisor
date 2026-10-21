@@ -7,7 +7,7 @@ import { AdvisorRuntime } from "./runtime.ts"
 import { COMMAND_DESCRIPTION, control, type CommandCtx } from "./commands.ts"
 import { ensureStarterConfig } from "./setup.ts"
 import { CONTROL_TEXT, SELF_MARK, SEVERITY_RANK, type Msg, type Note } from "./types.ts"
-import { errMessage, parseModel } from "./util.ts"
+import { clip, errMessage, parseModel } from "./util.ts"
 
 const CONTROL_AGENT = "advisor-ctl"
 const CONTROL_TTL_MS = 60_000
@@ -22,11 +22,19 @@ function readPermission(): Record<string, string> {
   return rules
 }
 
-/** Permissions of an advisor agent: deny everything, then allow `advise` and the granted tools. */
-export function advisorPermission(spec: AdvisorSpec): Record<string, unknown> {
+// advisor agent の権限: 既定は全拒否。advise と調査ツールだけ許可し、書き込み系は利用者の設定に従う (無ければ ask)。
+// Quyền của agent advisor: mặc định từ chối hết; chỉ cho advise và tool điều tra, tool ghi theo luật của người dùng (không có thì ask).
+export function advisorPermission(spec: AdvisorSpec, user?: unknown): Record<string, unknown> {
   const perm: Record<string, unknown> = { "*": "deny", advise: "allow" }
+  const userRule = (tool: string): unknown => {
+    if (typeof user === "string") return user
+    if (user && typeof user === "object" && tool in user) return (user as Record<string, unknown>)[tool]
+    return undefined
+  }
   for (const t of spec.tools) {
-    perm[t] = t === "read" ? readPermission() : "allow"
+    if (t === "read") perm[t] = readPermission()
+    else if (t === "grep" || t === "glob") perm[t] = "allow"
+    else perm[t] = userRule(t) ?? "ask"
   }
   return perm
 }
@@ -97,6 +105,9 @@ export async function createAdvisorHooks(input: PluginInput): Promise<Hooks> {
   // エージェント定義の advisor: 指定。task.agentAdvisor が優先して上書きする。
   // Khóa advisor: trong định nghĩa agent; task.agentAdvisor ghi đè.
   const frontAdvisor = new Map<string, string>()
+  // 拒否される予定の権限要求 (誰も答えなければ時間切れで reject)。
+  // Các yêu cầu quyền đang chờ, sẽ bị từ chối nếu không ai trả lời.
+  const permissionTimers = new Map<string, NodeJS.Timeout>()
 
   // ------------------------------------------------------------------ runtimes
 
@@ -218,6 +229,32 @@ export async function createAdvisorHooks(input: PluginInput): Promise<Hooks> {
       case "session.status": {
         const { sessionID, status } = ev.properties
         if (!registry.isAdvisorSession(sessionID)) delivery.setBusy(sessionID, status?.type !== "idle")
+        else if (status?.type === "retry") registry.owners.get(sessionID)?.onRetryStatus(status)
+        break
+      }
+      // 人間に聞く権限要求は無期限に待たせない。時間切れなら拒否してレビューを先へ進める。
+      // Yêu cầu quyền cần người trả lời không được chờ vô hạn: hết hạn thì từ chối để review đi tiếp.
+      case "permission.updated":
+      case "permission.asked": {
+        const p = ev.properties
+        const id = String(p?.id ?? p?.requestID ?? "")
+        if (!id || !registry.isAdvisorSession(p?.sessionID) || permissionTimers.has(id)) break
+        const sessionID = String(p.sessionID)
+        permissionTimers.set(
+          id,
+          setTimeout(() => {
+            permissionTimers.delete(id)
+            log("warn", "advisor permission request timed out; rejected", { sessionID, permission: id, title: p?.title })
+            if (cfg.toast) showToast(`An advisor asked for permission (${clip(String(p?.title ?? "tool"), 80)}) and nobody answered; it was rejected.`, "warning")
+            Promise.resolve(client.postSessionIdPermissionsPermissionId({ path: { id: sessionID, permissionID: id }, body: { response: "reject" } })).catch(() => {})
+          }, cfg.permissionTimeoutMs),
+        )
+        break
+      }
+      case "permission.replied": {
+        const id = String(ev.properties?.permissionID ?? ev.properties?.requestID ?? ev.properties?.id ?? "")
+        clearTimeout(permissionTimers.get(id))
+        permissionTimers.delete(id)
         break
       }
       case "session.error": {
@@ -311,7 +348,7 @@ export async function createAdvisorHooks(input: PluginInput): Promise<Hooks> {
             shared: cfg.instructions,
             specialization: spec.instructions,
           }),
-          permission: advisorPermission(spec),
+          permission: advisorPermission(spec, existing),
           hidden: true,
         }
       }
@@ -427,11 +464,6 @@ export async function createAdvisorHooks(input: PluginInput): Promise<Hooks> {
     "experimental.chat.system.transform": async (i, o) => {
       if (!cfg.explainToPrimary || !i.sessionID || disabledSessions.has(i.sessionID) || registry.isAdvisorSession(i.sessionID)) return
       o.system.push(PRIMARY_EXPLAINER)
-    },
-
-    "permission.ask": async (i, o) => {
-      // An advisor must never wait for a human: refuse anything that would prompt.
-      if (registry.isAdvisorSession((i as any).sessionID)) o.status = "deny"
     },
 
     dispose: async () => {

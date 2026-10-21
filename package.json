@@ -1,6 +1,6 @@
 {
   "name": "@vocweb/opencode-advisor",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "A live advisor for opencode: a second model that watches your session and sends advice while the agent is still working. A port of oh-my-pi's advisor.",
   "type": "module",
   "license": "MIT",

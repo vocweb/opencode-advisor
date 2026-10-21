@@ -15,6 +15,7 @@ export interface ReviewCtx {
 
 export interface UsageSink {
   recordUsage(info: { id: string; cost?: number; tokens?: { input: number; output: number; reasoning?: number; cache?: { read: number; write: number } } }): void
+  onRetryStatus(status: { attempt: number; message: string; next: number }): void
 }
 
 export interface SessionMeta {

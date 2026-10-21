@@ -73,6 +73,9 @@ export interface AdvisorConfig {
   // Số batch bị bỏ liên tiếp đạt ngưỡng này thì advisor dừng.
   maxConsecutiveFailures: number
   toast: boolean
+  // 人間が答えない権限要求を拒否するまでの時間 (ms)。レビューが無期限に止まるのを防ぐ。
+  // Thời gian (ms) trước khi từ chối yêu cầu quyền không ai trả lời, tránh review kẹt vô hạn.
+  permissionTimeoutMs: number
   // 主エージェントの system prompt に advisory の説明を足すか。
   // Có thêm lời giải thích về advisory vào system prompt của primary hay không.
   explainToPrimary: boolean
@@ -127,6 +130,7 @@ export const DEFAULTS = {
   reviewTimeoutMs: 300_000,
   maxConsecutiveFailures: 3,
   toast: true,
+  permissionTimeoutMs: 120_000,
   explainToPrimary: true,
 }
 
@@ -309,7 +313,7 @@ const TOP_KEYS = keys("instructions", "maxNotesPerUpdate", "modelRoles", "adviso
 const ADVISOR_KEYS = keys(
   "enabled", "reviewMode", "reviewInterval", "maxNotesPerUpdate", "syncBacklog", "immuneTurns", "continueSeverity", "evictStaleResults",
   "maxSteersPerPrompt", "fetchLimit", "primeMessages", "primeChars", "maxMessageChars", "maxToolInputChars", "maxToolOutputChars",
-  "maxEditChars", "includeReasoning", "contextTokenBudget", "reviewTimeoutMs", "maxConsecutiveFailures", "toast", "explainToPrimary", "controlModel",
+  "maxEditChars", "includeReasoning", "contextTokenBudget", "reviewTimeoutMs", "maxConsecutiveFailures", "toast", "permissionTimeoutMs", "explainToPrimary", "controlModel",
 )
 const RETRY_KEYS = keys("enabled", "modelFallback", "fallbackOn", "fallbackRevertPolicy", "maxDelayMs", "fallbackChains")
 const ENTRY_KEYS = keys("name", "enabled", "model", "tools", "reviewMode", "reviewInterval", "syncBacklog", "maxNotesPerUpdate", "instructions")
@@ -393,6 +397,7 @@ function parseLayer(root: Obj, file: string, warnings: string[], home: string): 
       set("reviewTimeoutMs", num(o.reviewTimeoutMs, 5_000, 3_600_000))
       set("maxConsecutiveFailures", num(o.maxConsecutiveFailures, 1, 20))
       set("toast", bool(o.toast))
+      set("permissionTimeoutMs", num(o.permissionTimeoutMs, 1_000, 3_600_000))
       set("explainToPrimary", bool(o.explainToPrimary))
       set("controlModel", str(o.controlModel))
     }

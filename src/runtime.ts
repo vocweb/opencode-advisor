@@ -109,6 +109,7 @@ export class AdvisorRuntime {
   private deferred: Note[] = []
   private usageSeen = new Set<string>()
   private abort: AbortController | undefined
+  private retryAbort: string | undefined
   private readonly guard: EmissionGuard
 
   constructor(private deps: RuntimeDeps) {
@@ -228,6 +229,19 @@ export class AdvisorRuntime {
         signal.addEventListener("abort", done, { once: true })
       })
     }
+  }
+
+  // opencode は 429/5xx を自分で再試行し続け、prompt が戻らない。待つ価値がなければここで中断して fallback に回す。
+  // opencode tự retry 429/5xx mãi nên prompt không trả về; nếu chờ không đáng thì ngắt ở đây để chuyển sang fallback.
+  onRetryStatus(status: { attempt: number; message: string; next: number }): void {
+    if (!this.abort || this.retryAbort !== undefined || !this.advisorSessionID) return
+    const kind = classifyFailure("", status.message)
+    const maxDelay = this.deps.cfg.retry.maxDelayMs
+    const wait = status.next - Date.now()
+    const tooLong = maxDelay > 0 && wait > maxDelay
+    if (!this.chain.wouldSwitch(kind) && !tooLong && status.attempt <= MAX_ATTEMPTS) return
+    this.retryAbort = status.message
+    this.deps.client.session.abort({ path: { id: this.advisorSessionID } }).catch(() => {})
   }
 
   /** Account cost/tokens of an advisor assistant message (called from the event stream). */
@@ -511,8 +525,12 @@ export class AdvisorRuntime {
       this.abort = undefined
       registry.reviews.delete(advisorSession)
     }
+    const retryWhy = this.retryAbort
+    this.retryAbort = undefined
     if (this.disposed) return
-
+    // 中断した prompt は info.error なしで戻ることがある。成功と取り違えないよう先に失敗として扱う。
+    // prompt bị ngắt có thể trả về mà không có info.error; phải coi là thất bại trước, kẻo nhầm với thành công.
+    if (retryWhy !== undefined) throw new ReviewError(`provider kept failing and was not worth waiting for: ${retryWhy}`, "ProviderRetry", false)
     if (info?.error) {
       const name = String(info.error.name ?? "Error")
       const msg = `${name}: ${info.error.data?.message ?? ""}`.trim()
@@ -525,7 +543,6 @@ export class AdvisorRuntime {
     this.reprimed = false
     this.droppedCycles = 0
     this.lastError = undefined
-    this.chain.onSuccess()
     this.stats.reviews++
     this.recordUsage(info ?? { id: `r${reviewId}` })
 
