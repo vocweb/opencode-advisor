@@ -23,11 +23,6 @@
   "peerDependencies": {
     "@opencode-ai/plugin": "*"
   },
-  "peerDependenciesMeta": {
-    "@opencode-ai/plugin": {
-      "optional": true
-    }
-  },
   "devDependencies": {
     "@opencode-ai/plugin": "^1.19.3",
     "@opencode-ai/sdk": "^1.19.3",
