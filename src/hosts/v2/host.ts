@@ -25,7 +25,6 @@ export function createV2Host(ctx: V2Ctx, log: Logger): Host {
   }
 
   return {
-    kind: "v2",
     log,
     transcript,
 

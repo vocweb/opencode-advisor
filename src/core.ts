@@ -96,6 +96,9 @@ export class AdvisorCore {
   disposeSession(id: string): void {
     this.runtimes.get(id)?.forEach((r) => r.dispose())
     this.runtimes.delete(id)
+    // 配送待ちのノートと aside も捨てる。/advisor off や session 削除の後に古い助言が届かないようにするため。
+    // Bỏ cả note đang chờ giao và aside, để sau /advisor off hay khi xóa session không còn advisory cũ nào được giao.
+    this.delivery.clear(id)
   }
 
   // enable/disable を既存の全セッションの runtime に即反映する。
@@ -137,8 +140,27 @@ export class AdvisorCore {
     }
     if (this.registry.isAdvisorSession(id)) return false
     if (!this.registry.meta.get(id)?.parentID) return true
+    // advisor が作った subagent (その孫を含む) は見ない。見ると advisor が advisor を呼び出して連鎖する。
+    // Không theo dõi subagent do advisor tạo (kể cả các cấp dưới), nếu không advisor sẽ gọi advisor và dây chuyền kéo dài.
+    if (await this.underAdvisor(id)) return false
     if (!this.subSpecs.has(id)) this.subSpecs.set(id, await this.specsForSubagent(id))
     return this.subSpecs.get(id)!.length > 0
+  }
+
+  private async underAdvisor(id: string): Promise<boolean> {
+    let cur = id
+    for (let i = 0; i < 8; i++) {
+      const parent = this.registry.meta.get(cur)?.parentID
+      if (!parent) return false
+      if (this.registry.isAdvisorSession(parent)) return true
+      if (!this.registry.meta.has(parent)) {
+        const s = await this.host.sessionInfo(parent)
+        this.registry.noteSession(s.id, { parentID: s.parentID, title: s.title })
+        if (this.registry.isAdvisorSession(parent)) return true
+      }
+      cur = parent
+    }
+    return false
   }
 
   private whenEligible(id: string, fn: () => void): void {
@@ -227,6 +249,9 @@ export class AdvisorCore {
 
   compacted(id: string): void {
     this.runtimes.get(id)?.forEach((r) => r.reset())
+    // 圧縮で履歴が要約に置き換わるので、古い内容を前提にした助言は捨てる。
+    // Lịch sử bị thay bằng bản tóm tắt, nên bỏ các advisory dựa trên nội dung cũ.
+    this.delivery.clear(id)
   }
 
   /** A message typed by the user (not one of ours). */
@@ -245,7 +270,10 @@ export class AdvisorCore {
   async beforeModelCall(id: string, opts: { isControl: boolean }): Promise<void> {
     if (this.disabledSessions.has(id) || opts.isControl) return
     const rts = this.runtimes.get(id) ?? []
-    if (rts.length > 0) await Promise.all(rts.map((r) => r.waitCaughtUp(r.spec.syncBacklog, this.delivery.abortSignal(id))))
+    const waiting = rts.filter((r) => r.spec.syncBacklog !== "off")
+    if (waiting.length === 0) return
+    await Promise.all(waiting.map((r) => r.waitCaughtUp(r.spec.syncBacklog, this.delivery.abortSignal(id))))
+    await this.delivery.flushNow(id)
   }
 
   /** Non-interrupting notes waiting for the next model call, rendered as one block; undefined when there are none. */

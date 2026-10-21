@@ -3,6 +3,7 @@ import os from "node:os"
 import path from "node:path"
 import { parse as parseYaml } from "yaml"
 import { SEVERITIES, type Severity } from "./types.ts"
+import { isSecretPath } from "./policy.ts"
 import { slugify } from "./util.ts"
 
 export type SyncBacklog = "off" | 1 | 3 | 5 | "strict"
@@ -172,10 +173,23 @@ function readText(file: string, maxBytes = 200_000): string | undefined {
 
 // ---------------------------------------------------------------- WATCHDOG.md
 
+// 存在しないパスでも例外にせず、そのまま返す。存在しなければ後段の readText が失敗するので安全。
+// Đường dẫn không tồn tại thì trả nguyên, không ném lỗi; readText phía sau sẽ tự thất bại nên vẫn an toàn.
+function safeRealpath(p: string): string {
+  try {
+    return fs.realpathSync(p)
+  } catch {
+    return path.resolve(p)
+  }
+}
+
 const IMPORT_RE = /(^|\s)@((?:\.{1,2}\/|~\/)[^\s`]+)/g
 
-export function expandImports(text: string, file: string, seen: Set<string> = new Set(), depth = 0, home = os.homedir()): string {
+// confine 指定時は realpath が配下にある非秘密ファイルだけ import する。リポジトリの設定が ~/.aws/credentials 等を system prompt に取り込めないようにするため。
+// Khi có confine chỉ import file không bí mật có realpath nằm trong đó, để cấu hình trong repo không kéo được ~/.aws/credentials vào system prompt.
+export function expandImports(text: string, file: string, seen: Set<string> = new Set(), depth = 0, home = os.homedir(), confine?: string): string {
   if (depth > 5) return text
+  const root = confine === undefined ? undefined : safeRealpath(confine)
   const base = path.dirname(file)
   let fenced = false
   return text
@@ -195,10 +209,15 @@ export function expandImports(text: string, file: string, seen: Set<string> = ne
             : seg.replace(IMPORT_RE, (m, lead: string, p: string) => {
                 const resolved = p.startsWith("~/") ? path.join(home, p.slice(2)) : path.resolve(base, p)
                 if (seen.has(resolved)) return m
+                if (root !== undefined) {
+                  const real = safeRealpath(resolved)
+                  const inside = real === root || real.startsWith(root.endsWith(path.sep) ? root : root + path.sep)
+                  if (p.startsWith("~/") || !inside || isSecretPath(real)) return m
+                }
                 const content = readText(resolved, 50_000)
                 if (content === undefined) return m
                 seen.add(resolved)
-                const out = expandImports(content, resolved, seen, depth + 1, home).trim()
+                const out = expandImports(content, resolved, seen, depth + 1, home, confine).trim()
                 seen.delete(resolved)
                 return `${lead}${out}`
               }),
@@ -219,7 +238,10 @@ export function discoverWatchdog(dirs: string[], globalDir: string, home = os.ho
     seenFiles.add(real)
     const raw = readText(real)
     if (raw === undefined) continue
-    const content = expandImports(raw, real, new Set([real]), 0, home).trim()
+    // グローバル設定はユーザー自身のものなので制限しない。プロジェクト側は最上位ディレクトリの外を読ませない。
+    // Cấu hình global là của chính người dùng nên không giới hạn; cấu hình trong project không được đọc ra ngoài thư mục gốc.
+    const confine = path.dirname(real) === path.resolve(globalDir) ? undefined : dirs[0]
+    const content = expandImports(raw, real, new Set([real]), 0, home, confine).trim()
     if (content) out.push({ file: real, content })
   }
   return out
@@ -336,9 +358,9 @@ function checkKeys(o: Obj, known: Record<string, true>, prefix: string, file: st
   }
 }
 
-function parseLayer(root: Obj, file: string, warnings: string[], home: string): Layer {
+function parseLayer(root: Obj, file: string, warnings: string[], home: string, confine?: string): Layer {
   const layer: Layer = { advisor: {}, retry: {}, agentAdvisor: {}, advisors: [] }
-  const imports = (text: string) => expandImports(text, file, new Set([file]), 0, home).trim()
+  const imports = (text: string) => expandImports(text, file, new Set([file]), 0, home, confine).trim()
   checkKeys(root, TOP_KEYS, "", file, warnings)
 
   const ins = str(root.instructions)
@@ -540,7 +562,7 @@ export function loadConfig(opts: LoadOptions): AdvisorConfig {
       warnings.push(`${file}: expected a mapping; skipped`)
       continue
     }
-    layers.push(parseLayer(doc, file, warnings, home))
+    layers.push(parseLayer(doc, file, warnings, home, path.dirname(file) === path.resolve(gdir) ? undefined : dirs[0]))
     sources.push(file)
   }
 

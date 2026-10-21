@@ -88,7 +88,7 @@ export class ModelChain {
     // fallback 側の拒否は通常の失敗と同じく冷却し、固定しない。
     // Primary từ chối là phán đoán về nội dung, không phải lỗi model: không cooldown, ghim sang fallback.
     // Fallback từ chối thì cooldown như lỗi thường và không ghim.
-    if (kind === "refusal" && idx === 0) {
+    if (kind === "refusal" && idx === 0 && this.floor < 1) {
       this.floor = 1
       return "switched"
     }
@@ -97,7 +97,9 @@ export class ModelChain {
     const next = this.current()
     const nextIdx = next ? chain.indexOf(next) : -1
     const nextCooled = next !== undefined && (this.cooldown.get(next) ?? 0) > this.now()
-    if (next && next !== failing && !nextCooled) {
+    // floor より下 (主モデル) へ戻る切替は行わない。両方が拒否すると互いに切り替えて無限ループになるため。
+    // Không chuyển ngược về model dưới floor (model chính); nếu cả hai cùng từ chối thì sẽ đổi qua lại vô hạn.
+    if (next && next !== failing && !nextCooled && nextIdx >= this.floor) {
       if (this.retry.fallbackRevertPolicy === "never") this.floor = Math.max(this.floor, nextIdx)
       return "switched"
     }

@@ -3,7 +3,7 @@ import { COMMAND_DESCRIPTION } from "../../commands.ts"
 import { loadConfig } from "../../config.ts"
 import { AdvisorCore } from "../../core.ts"
 import type { Logger } from "../../host.ts"
-import { agentNameFor, evictStaleResults } from "../../policy.ts"
+import { agentNameFor, evictStaleResults, scrubInvestigationResults } from "../../policy.ts"
 import { ADVISE_TOOL_DESCRIPTION, buildAdvisorSystemPrompt, PRIMARY_EXPLAINER } from "../../prompts.ts"
 import { ensureStarterConfig } from "../../setup.ts"
 import { CONTROL_TEXT, SELF_MARK } from "../../types.ts"
@@ -236,6 +236,7 @@ export async function createV1Hooks(input: PluginInput): Promise<Hooks> {
       const sid = o.messages.at(-1)?.info.sessionID
       if (!sid) return
       if (core.isAdvisorSession(sid)) {
+        scrubInvestigationResults(o.messages as any)
         if (cfg.evictStaleResults) evictStaleResults(o.messages as any)
         return
       }

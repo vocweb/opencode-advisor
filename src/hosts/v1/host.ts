@@ -58,7 +58,6 @@ export function createV1Host(client: V1Client, log: Logger): Host {
   }
 
   return {
-    kind: "v1",
     log,
     transcript,
 

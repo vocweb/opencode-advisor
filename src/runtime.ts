@@ -346,6 +346,9 @@ export class AdvisorRuntime {
   // 1 バッチをレビューする。モデル切替は即再試行し、試行回数に数えない。
   // Review một batch; chuyển model thì thử lại ngay và không tính vào số lần thử.
   private async runBatch(final: boolean, covered: number): Promise<void> {
+    // 切替の連続回数に上限を設ける。想定外の状態でも API を叩き続けないための保険。
+    // Giới hạn số lần chuyển model liên tiếp; phòng khi trạng thái bất ngờ khiến ta gọi API mãi.
+    let switches = 0
     for (let attempt = 1; ; attempt++) {
       try {
         this.batchCursor = undefined
@@ -373,7 +376,7 @@ export class AdvisorRuntime {
           this.toast(`Advisor "${this.spec.name}" paused: usage limit reached on every configured model. Use /advisor reset once it recovers.`, "warning")
           return
         }
-        if (outcome === "switched") {
+        if (outcome === "switched" && ++switches <= this.chain.chain().length) {
           attempt--
           continue
         }

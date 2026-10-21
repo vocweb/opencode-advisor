@@ -69,6 +69,15 @@ test("fallback: a refusal by the primary pins the fallback until reset; a refusi
   assert.equal(a.c.current(), "p/main", "a compaction or new conversation (reset) retries the primary")
 })
 
+test("fallback: when the primary and the only fallback both refuse, it settles instead of switching back and forth", () => {
+  const a = chain(retry({ fallbackChains: { advisor: ["f/one"] } }))
+  assert.equal(a.c.onFailure("refusal"), "switched", "the primary refuses: move to the fallback")
+  assert.equal(a.c.current(), "f/one")
+  assert.equal(a.c.onFailure("refusal"), "stay", "the fallback refuses too: nowhere to go")
+  assert.equal(a.c.current(), "p/main", "every model is cooling down: the primary is used rather than nothing")
+  assert.equal(a.c.onFailure("refusal"), "stay", "a refusal while already pinned out must not switch again")
+})
+
 test("fallback: wouldSwitch reports whether a failure could move to another model without changing state", () => {
   const { c } = chain(retry({ fallbackChains: { advisor: ["f/one"] } }))
   assert.equal(c.wouldSwitch("usage-limit"), true)

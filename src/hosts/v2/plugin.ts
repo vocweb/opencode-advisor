@@ -2,7 +2,8 @@ import { COMMAND_DESCRIPTION } from "../../commands.ts"
 import { loadConfig } from "../../config.ts"
 import { AdvisorCore } from "../../core.ts"
 import type { Logger } from "../../host.ts"
-import { agentNameFor, EVICTED, isEvictableTool } from "../../policy.ts"
+import { agentNameFor, EVICTED, isEvictableTool, scrubSecretOutput } from "../../policy.ts"
+import { redact } from "../../redact.ts"
 import { ADVISE_TOOL_DESCRIPTION, buildAdvisorSystemPrompt, PRIMARY_EXPLAINER } from "../../prompts.ts"
 import { ensureStarterConfig } from "../../setup.ts"
 import { SELF_MARK } from "../../types.ts"
@@ -12,9 +13,30 @@ import { advisorRules, type V2Rule } from "./permission.ts"
 
 const TESTED_WITH = "2.1"
 
-/** True when `ctx` is the full v2 plugin context. opencode 1.x also calls `setup` and passes a partial one. */
-export function isV2Context(ctx: V2Ctx | undefined): boolean {
-  return !!ctx && !!ctx.location && typeof ctx.session?.hook === "function" && typeof ctx.event?.subscribe === "function" && typeof ctx.tool?.transform === "function"
+// setup が必須とする v2 のメンバー。1 つでも欠けたら動かさず、何が欠けたかを必ず log に残す。
+// Các thành viên v2 mà setup bắt buộc; thiếu một cái là không chạy, nhưng luôn ghi log cái nào thiếu.
+const REQUIRED_MEMBERS: [string, (c: V2Ctx) => unknown][] = [
+  ["location", (c) => c.location],
+  ["session.hook", (c) => c.session?.hook],
+  ["session.context", (c) => c.session?.context],
+  ["session.create", (c) => c.session?.create],
+  ["session.prompt", (c) => c.session?.prompt],
+  ["session.synthetic", (c) => c.session?.synthetic],
+  ["event.subscribe", (c) => c.event?.subscribe],
+  ["tool.transform", (c) => c.tool?.transform],
+  ["agent.transform", (c) => c.agent?.transform],
+]
+
+export function missingV2Members(ctx: V2Ctx | undefined): string[] {
+  return REQUIRED_MEMBERS.filter(([name, get]) => {
+    const v = ctx ? get(ctx) : undefined
+    return name === "location" ? !v : typeof v !== "function"
+  }).map(([name]) => name)
+}
+
+/** opencode 1.x also calls `setup` with a partial context; this tells whether `ctx` at least looks like a 2.x one. */
+export function looksLikeV2(ctx: V2Ctx | undefined): boolean {
+  return !!ctx && (!!ctx.location || typeof ctx.session?.hook === "function" || typeof ctx.event?.subscribe === "function" || String(ctx.app?.version ?? "").startsWith("2"))
 }
 
 // 隠れた session を 1 つ作るたびに log が増えないよう、info/debug は環境変数があるときだけ出す。
@@ -167,6 +189,7 @@ export async function setupV2(ctx: V2Ctx): Promise<(() => void) | void> {
       if (core.isAdvisorSession(sid)) {
         // 古い調査ツールの出力はスタブにする。モデルへ送る写しだけを変える。
         // Output cũ của tool điều tra được thay bằng stub; chỉ đổi bản gửi model.
+        scrubV2(ev.messages)
         if (cfg.evictStaleResults) evictV2(ev.messages)
         return
       }
@@ -338,6 +361,18 @@ function evictV2(messages: any[]): void {
     if (m?.role !== "tool" || !Array.isArray(m.content)) continue
     for (const part of m.content) {
       if (part?.type === "tool-result" && isEvictableTool(part.name) && part.result?.type === "text") part.result = { ...part.result, value: EVICTED }
+    }
+  }
+}
+
+// 調査ツールの出力から秘密ファイルの内容を取り除く。grep/glob は権限ではパスを拒否できないため、モデルへ渡す直前に処理する。
+// Loại nội dung file bí mật khỏi output tool điều tra; grep/glob không deny được theo đường dẫn nên xử lý ngay trước khi đưa cho model.
+function scrubV2(messages: any[]): void {
+  for (const m of messages) {
+    if (m?.role !== "tool" || !Array.isArray(m.content)) continue
+    for (const part of m.content) {
+      if (part?.type !== "tool-result" || !isEvictableTool(part.name) || part.result?.type !== "text" || typeof part.result.value !== "string") continue
+      part.result = { ...part.result, value: part.name === "read" ? redact(part.result.value) : scrubSecretOutput(part.result.value) }
     }
   }
 }

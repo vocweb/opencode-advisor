@@ -70,6 +70,21 @@ test("redact: removes well-known secret shapes", () => {
   assert.ok(!redact(pem).includes("MIIabc"))
 })
 
+test("redact: JSON/YAML-quoted keys, quoted values with spaces, pass/pwd names and more token families", () => {
+  const hidden: [string, string][] = [
+    ['{"apiKey": "abc12345678xyz"}', "abc12345678xyz"],
+    ['{"password":"hunter2hunter2"}', "hunter2hunter2"],
+    ['password: "correct horse battery"', "correct horse"],
+    ['client_secret = "abc 12345 678"', "abc 12345"],
+    ["DB_PASS=hunter2hunter", "hunter2hunter"],
+    ["glpat-" + "a1B2c3D4e5F6g7H8i9J0", "a1B2c3D4"],
+    ["npm_" + "a1B2c3D4e5".repeat(4), "a1B2c3D4e5a1B2c3"],
+    ["sk_live_" + "a1B2c3D4e5F6g7H8", "a1B2c3D4e5F6"],
+  ]
+  for (const [input, secret] of hidden) assert.ok(!redact(input).includes(secret), `leaked: ${input} -> ${redact(input)}`)
+  for (const s of ['apiKey: "string"', "secret: $SECRET_VALUE_X", "tokens: number"]) assert.equal(redact(s), s)
+})
+
 test("redact: leaves ordinary code and prose alone", () => {
   for (const s of ["const key = process.env.API_KEY", "the password field is required", "token = tokens.next()", "x = 5 // sk-"]) {
     assert.equal(redact(s), s)

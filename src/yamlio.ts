@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto"
 import fs from "node:fs"
 import path from "node:path"
 import { isMap, isSeq, parseDocument, type Document } from "yaml"
@@ -14,13 +15,20 @@ export function resolveWatchdogFile(dir: string): string {
   return !fs.existsSync(yml) && fs.existsSync(yaml) ? yaml : yml
 }
 
-// 一時ファイル経由で書き込み、クラッシュしても半端な設定を残さない。
-// Ghi qua file tạm rồi rename để crash không để lại file cấu hình dở dang.
+// 推測できない名前の一時ファイルに排他的に書いてから rename する。リポジトリ側に置かれた symlink 経由で任意ファイルを上書きされないようにするため。
+// Ghi độc quyền vào file tạm có tên không đoán được rồi mới rename, để symlink do repo đặt sẵn không bị lợi dụng ghi đè file tùy ý.
 function writeAtomic(file: string, text: string): void {
   fs.mkdirSync(path.dirname(file), { recursive: true })
-  const tmp = `${file}.tmp`
-  fs.writeFileSync(tmp, text)
-  fs.renameSync(tmp, file)
+  const st = fs.lstatSync(file, { throwIfNoEntry: false })
+  if (st?.isSymbolicLink()) throw new Error(`${file} is a symbolic link; refusing to write through it`)
+  const tmp = path.join(path.dirname(file), `.${path.basename(file)}.${randomBytes(6).toString("hex")}.tmp`)
+  fs.writeFileSync(tmp, text, { flag: "wx", mode: 0o600 })
+  try {
+    fs.renameSync(tmp, file)
+  } catch (e) {
+    fs.rmSync(tmp, { force: true })
+    throw e
+  }
 }
 
 // parseDocument ならコメントが保持され、書き戻しても消えない。

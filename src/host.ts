@@ -39,7 +39,6 @@ export interface PromptInput {
  * v1 and v2 each implement it; the core (runtime, delivery, commands, route, guard, config...) never touches an SDK.
  */
 export interface Host {
-  readonly kind: "v1" | "v2"
   readonly log: Logger
 
   /** Transcript of any session in a normalized shape; `limit` = the last N messages (all when omitted). */

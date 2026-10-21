@@ -213,6 +213,26 @@ export class Delivery {
     }
   }
 
+  /** Forget everything queued for a session: pending notes, the batch timer, asides and the continuation flag. */
+  clear(primaryID: string): void {
+    const s = this.states.get(primaryID)
+    if (!s) return
+    if (s.timer) clearTimeout(s.timer)
+    s.timer = undefined
+    s.pending = []
+    s.asides = []
+    s.continuation = false
+  }
+
+  // syncBacklog の待ちが明けた直後に、そのセッションのキューを配送する。待ちの意味は「次の呼び出し前にノートが届いている」ことだから。
+  // Giao ngay hàng đợi của session sau khi hết chờ syncBacklog; ý nghĩa của việc chờ là note đã tới nơi trước lần gọi kế tiếp.
+  async flushNow(primaryID: string): Promise<void> {
+    const s = this.st(primaryID)
+    if (s.timer) clearTimeout(s.timer)
+    s.timer = undefined
+    await this.flush(primaryID).catch((e) => this.log("warn", "advisory delivery failed", { error: errMessage(e), session: primaryID }))
+  }
+
   private async flush(primaryID: string): Promise<void> {
     const s = this.st(primaryID)
     const items = s.pending.splice(0)
