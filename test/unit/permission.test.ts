@@ -1,6 +1,6 @@
 import { test } from "node:test"
 import assert from "node:assert/strict"
-import { advisorPermission } from "../../src/plugin.ts"
+import { advisorPermission } from "../../src/hosts/v1/permission.ts"
 import type { AdvisorSpec } from "../../src/config.ts"
 
 const spec = (tools: string[]) => ({ tools }) as unknown as AdvisorSpec

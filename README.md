@@ -6,15 +6,21 @@ After each step of the main agent, the advisor reads only the new part of the tr
 
 ## Install
 
-This plugin needs opencode 1.19.x. It does not load on opencode 2.x yet: 2.x expects a different plugin format (a default export with an `id`), and fails with "Plugin must export a default definition". Check your version with `opencode --version`.
+This plugin runs on opencode 1.19.x and on opencode 2.x (tested on 1.19.3 and 2.1.0). One package serves both: opencode 1 calls its `server` export, opencode 2 calls its `setup` export. Check your version with `opencode --version`.
 
-Add the package to `opencode.json`, either the global `~/.config/opencode/opencode.json` or one in your project:
+Add the package to your opencode config, either the global one in `~/.config/opencode/` or one in your project. The key differs by major version:
 
 ```json
 { "plugin": ["@vocweb/opencode-advisor"] }
 ```
 
-opencode installs it on startup. The first time it runs, the plugin creates a starter `~/.config/opencode/WATCHDOG.yml` and shows a toast. Then pick a model from inside opencode:
+```json
+{ "plugins": ["@vocweb/opencode-advisor"] }
+```
+
+The first block is for opencode 1.x (`opencode.json`), the second for opencode 2.x.
+
+opencode installs it on startup. The first time it runs, the plugin creates a starter `~/.config/opencode/WATCHDOG.yml` (and shows a toast on opencode 1.x). Then pick a model from inside opencode:
 
 ```
 /advisor setup anthropic/claude-haiku-4-5
@@ -118,7 +124,8 @@ Some oh-my-pi options have no counterpart in opencode. They are accepted and ign
 - Config changes other than `/advisor setup`, `enable` and `disable` need an opencode restart.
 - `syncBacklog` can only hold the main agent before its next LLM call, not before it returns its last answer. With `agent-end` and `strict`, the review runs after the final answer, and a note at or above `continueSeverity` then wakes the agent.
 - On shutdown the plugin waits up to 15 seconds for running reviews, but opencode 1.19.3 does not await a plugin's `dispose`. With `opencode run` the process exits about 15 ms after `dispose` starts, so the last review of a headless run is lost. `opencode serve` on SIGTERM does not call `dispose` at all.
-- It is built against the opencode plugin API 1.19.x and uses `experimental.*` hooks that may change. TUI toasts are not covered by the automated tests. Everything else is tested against a real `opencode serve`.
+- opencode 1.x: built against plugin API 1.19.x; it uses `experimental.*` hooks that may change. TUI toasts are not covered by the automated tests.
+- opencode 2.x: advisories are delivered as synthetic messages, so there are no toasts and `/advisor` replies appear in the transcript. Frontmatter `advisor:` on an agent file is not readable through the 2.x plugin API, so use `task.agentAdvisor` in `WATCHDOG.yml` instead. `/advisor` is not available in headless `opencode run`. If a future opencode renames a hook the plugin uses, that feature is skipped with a log line instead of failing the load. Everything is tested against a real `opencode serve` on both lines.
 - A custom agent with `"*": "allow"` can see the `advise` tool. Its calls are rejected.
 
 ## Development
@@ -126,11 +133,13 @@ Some oh-my-pi options have no counterpart in opencode. They are accepted and ign
 ```bash
 npm install
 npm run check      # typecheck, unit tests, build
-npm run test:e2e   # needs the opencode binary: OPENCODE_BIN=/path/to/opencode
-npm run test:pack  # installs the packed tarball through opencode.json and runs a review
+npm run test:e2e      # opencode 1.x; needs OPENCODE_BIN=/path/to/opencode
+npm run test:e2e:v2   # opencode 2.x; needs OPENCODE_BIN=/path/to/opencode
+npm run test:pack     # installs the packed tarball through opencode.json (1.x) and runs a review
+npm run test:pack:v2  # the same through the 2.x "plugins" key
 ```
 
-The E2E suite starts a real `opencode serve` in an isolated sandbox and points it at a scripted OpenAI-compatible mock, so the advisor and agent behave the same on every run. Use opencode 1.19.x for it; 2.x has a different API.
+The E2E suite starts a real `opencode serve` in an isolated sandbox and points it at a scripted OpenAI-compatible mock, so the advisor and agent behave the same on every run. Run the 1.x suite with an opencode 1.19.x binary and the 2.x suite with an opencode 2.x binary.
 
 ## Author
 

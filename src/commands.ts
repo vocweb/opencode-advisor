@@ -1,12 +1,13 @@
 import fs from "node:fs"
 import path from "node:path"
 import { globalConfigDir, type AdvisorConfig, type AdvisorSpec } from "./config.ts"
-import { unwrap, type Delivery } from "./delivery.ts"
+import type { Delivery } from "./delivery.ts"
+import type { AdvisorChild, Host } from "./host.ts"
 import { buildAdvisorSystemPrompt } from "./prompts.ts"
 import type { Registry } from "./registry.ts"
 import type { AdvisorRuntime } from "./runtime.ts"
 import { globalWatchdogFile } from "./setup.ts"
-import { ADVISOR_TITLE_PREFIX, type Client, type Msg } from "./types.ts"
+import { ADVISOR_TITLE_PREFIX, type Msg } from "./types.ts"
 import { clip, parseModelSelector, slugify } from "./util.ts"
 import { createTemplate, resolveWatchdogFile, setAdvisorEnabled, setModelRole } from "./yamlio.ts"
 
@@ -17,7 +18,7 @@ export interface CommandCtx {
   // enabled:false も含む実行中の roster。enable/disable/setup で書き換える。
   // Roster đang chạy, gồm cả entry enabled:false; enable/disable/setup sẽ sửa trực tiếp.
   specs: AdvisorSpec[]
-  client: Client
+  host: Host
   registry: Registry
   delivery: Delivery
   runtimes: Map<string, AdvisorRuntime[]>
@@ -100,15 +101,8 @@ interface Usage {
 
 const advisorName = (title: string) => title.slice(ADVISOR_TITLE_PREFIX.length).trim().replace(/ #\d+$/, "")
 
-interface ChildSession {
-  id: string
-  title: string
-  time?: { created?: number }
-}
-
-async function advisorChildren(ctx: CommandCtx, primaryID: string): Promise<ChildSession[]> {
-  const list = unwrap<ChildSession[]>(await ctx.client.session.children({ path: { id: primaryID } }))
-  return list.filter((c) => typeof c.title === "string" && c.title.startsWith(ADVISOR_TITLE_PREFIX)).sort((a, b) => (a.time?.created ?? 0) - (b.time?.created ?? 0))
+async function advisorChildren(ctx: CommandCtx, primaryID: string): Promise<AdvisorChild[]> {
+  return ctx.host.advisorChildren(primaryID)
 }
 
 // 子セッション全体から集計すれば、リセットや再起動をまたいでも合計が正しい。
@@ -119,7 +113,7 @@ async function usageFromChildren(ctx: CommandCtx, primaryID: string): Promise<Ma
     for (const child of await advisorChildren(ctx, primaryID)) {
       const name = advisorName(child.title)
       const u = out.get(name) ?? { cost: 0, tokensIn: 0, tokensOut: 0, contextTokens: 0 }
-      const msgs = unwrap<Msg[]>(await ctx.client.session.messages({ path: { id: child.id } }))
+      const msgs = await ctx.host.transcript(child.id)
       for (const m of msgs) {
         if (m.info.role !== "assistant") continue
         const t = m.info.tokens
@@ -197,13 +191,14 @@ export function inboxReport(ctx: CommandCtx, sessionID: string): string {
 function renderDumpMessage(m: Msg, raw: boolean): string[] {
   const out: string[] = []
   for (const p of m.parts) {
+    const text = (p.text ?? "").trim()
     if (p.type === "text") {
-      if (p.text.trim()) out.push(m.info.role === "user" ? `[update]\n${p.text.trim()}` : p.text.trim())
+      if (text) out.push(m.info.role === "user" ? `[update]\n${text}` : text)
     } else if (p.type === "reasoning") {
-      if (raw && p.text.trim()) out.push(`[reasoning]\n${p.text.trim()}`)
-    } else if (p.type === "tool") {
+      if (raw && text) out.push(`[reasoning]\n${text}`)
+    } else if (p.type === "tool" && p.state) {
       const st = p.state
-      const input = "input" in st ? (st.input as Record<string, unknown>) : {}
+      const input = (st.input && typeof st.input === "object" ? st.input : {}) as Record<string, unknown>
       const output = st.status === "completed" ? st.output : st.status === "error" ? st.error : ""
       if (p.tool === "advise") {
         out.push(`[advise ${String(input.severity ?? "nit")}] ${String(input.note ?? "")}`)
@@ -218,7 +213,7 @@ function renderDumpMessage(m: Msg, raw: boolean): string[] {
 }
 
 async function dump(ctx: CommandCtx, sessionID: string, raw: boolean): Promise<string> {
-  let children: ChildSession[]
+  let children: AdvisorChild[]
   try {
     children = await advisorChildren(ctx, sessionID)
   } catch (e) {
@@ -229,7 +224,7 @@ async function dump(ctx: CommandCtx, sessionID: string, raw: boolean): Promise<s
     const own = children.filter((c) => advisorName(c.title) === spec.name)
     const latest = own.at(-1)
     if (!latest) continue
-    const msgs = unwrap<Msg[]>(await ctx.client.session.messages({ path: { id: latest.id } }))
+    const msgs = await ctx.host.transcript(latest.id)
     const body: string[] = []
     if (raw) {
       body.push(

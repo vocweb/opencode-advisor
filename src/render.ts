@@ -1,5 +1,4 @@
-import type { Part } from "@opencode-ai/sdk"
-import { CONTROL_TEXT, SELF_MARK, type Msg } from "./types.ts"
+import { CONTROL_TEXT, SELF_MARK, type Msg, type MsgPart } from "./types.ts"
 import { redact } from "./redact.ts"
 import { escapeLt, truncateMiddle } from "./util.ts"
 
@@ -14,7 +13,7 @@ export interface RenderOptions {
 /** Tools whose input *is* the change; the advisor must see it to review it. */
 const EDIT_TOOLS = new Set(["edit", "write", "patch", "multiedit", "apply_patch", "applypatch", "notebookedit"])
 
-type AnyPart = Part & Record<string, any>
+type AnyPart = MsgPart & Record<string, any>
 
 /** True for text we injected ourselves (advisory cards, control-command prompts). */
 export function isSelfPart(p: AnyPart): boolean {
@@ -35,7 +34,7 @@ export function isControlMessage(m: Msg): boolean {
   )
 }
 
-function textOf(parts: Part[]): string {
+function textOf(parts: MsgPart[]): string {
   return parts
     .filter((p): p is AnyPart => p.type === "text" && !(p as AnyPart).ignored)
     .map((p) => p.text as string)
@@ -81,7 +80,7 @@ export function renderMessage(m: Msg, o: RenderOptions): string {
     const body = (t || "(no text)") + (files ? `\n(+${files} attached file${files > 1 ? "s" : ""})` : "")
     return `<user id="${info.id}">\n${escapeLt(truncateMiddle(body, o.maxMessageChars))}\n</user>`
   }
-  const a = info as Extract<Msg["info"], { role: "assistant" }>
+  const a = info
   const out: string[] = []
   const attrs = [`id="${a.id}"`, `model="${escapeLt(`${a.providerID}/${a.modelID}`)}"`]
   if (a.finish) attrs.push(`finish="${escapeLt(a.finish)}"`)

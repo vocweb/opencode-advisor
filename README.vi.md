@@ -6,15 +6,21 @@ Sau mỗi bước của agent chính, advisor chỉ đọc phần mới của tr
 
 ## Cài đặt
 
-Plugin này cần opencode 1.19.x. Nó chưa nạp được trên opencode 2.x, vì bản 2.x yêu cầu định dạng plugin khác (một default export có `id`) và báo lỗi "Plugin must export a default definition". Kiểm tra phiên bản bằng `opencode --version`.
+Plugin này chạy được trên opencode 1.19.x và opencode 2.x (đã thử trên 1.19.3 và 2.1.0). Một package dùng cho cả hai: opencode 1 gọi export `server`, opencode 2 gọi export `setup`. Kiểm tra phiên bản bằng `opencode --version`.
 
-Thêm package vào `opencode.json`, file global `~/.config/opencode/opencode.json` hoặc file trong project:
+Thêm package vào cấu hình opencode, bản toàn cục trong `~/.config/opencode/` hoặc bản trong project. Tên khóa khác nhau theo phiên bản chính:
 
 ```json
 { "plugin": ["@vocweb/opencode-advisor"] }
 ```
 
-opencode tự cài khi khởi động. Lần chạy đầu tiên, plugin tạo file `~/.config/opencode/WATCHDOG.yml` ban đầu (chưa có model) và hiện một toast nhắc bạn. Sau đó chọn model ngay trong opencode:
+```json
+{ "plugins": ["@vocweb/opencode-advisor"] }
+```
+
+Khối đầu dành cho opencode 1.x (`opencode.json`), khối sau dành cho opencode 2.x.
+
+opencode tự cài khi khởi động. Lần chạy đầu tiên, plugin tạo file `~/.config/opencode/WATCHDOG.yml` ban đầu (chưa có model) (và hiện toast nhắc bạn trên opencode 1.x). Sau đó chọn model ngay trong opencode:
 
 ```
 /advisor setup anthropic/claude-haiku-4-5
@@ -118,7 +124,8 @@ Một số tùy chọn của oh-my-pi không có tương đương trong opencode
 - Thay đổi cấu hình ngoài `/advisor setup`, `enable` và `disable` cần khởi động lại opencode.
 - `syncBacklog` chỉ giữ được agent chính trước lần gọi LLM kế tiếp, không giữ được trước khi nó trả câu trả lời cuối. Với `agent-end` và `strict`, review chạy sau câu trả lời cuối, rồi note từ mức `continueSeverity` trở lên mới đánh thức agent.
 - Khi thoát, plugin chờ tối đa 15 giây cho các review đang chạy, nhưng opencode 1.19.3 không await `dispose` của plugin. Với `opencode run`, tiến trình thoát khoảng 15 ms sau khi `dispose` bắt đầu, nên review cuối của lần chạy headless bị mất. `opencode serve` nhận SIGTERM thì không gọi `dispose`.
-- Plugin được viết cho API plugin của opencode 1.19.x và dùng các hook `experimental.*` có thể thay đổi. Toast TUI chưa được kiểm thử tự động. Phần còn lại được kiểm thử với `opencode serve` thật.
+- opencode 1.x: viết cho API plugin 1.19.x và dùng các hook `experimental.*` có thể thay đổi. Toast TUI chưa được kiểm thử tự động.
+- opencode 2.x: advisory được chuyển bằng message synthetic, nên không có toast và câu trả lời của `/advisor` hiện trong transcript. Frontmatter `advisor:` trong file agent không đọc được qua API plugin 2.x, hãy dùng `task.agentAdvisor` trong `WATCHDOG.yml`. `/advisor` không dùng được trong `opencode run` headless. Nếu opencode sau này đổi tên một hook mà plugin dùng, tính năng đó bị bỏ qua kèm một dòng log thay vì làm hỏng việc nạp plugin. Mọi thứ được kiểm thử với `opencode serve` thật trên cả hai dòng.
 - Agent tự định nghĩa với `"*": "allow"` sẽ thấy tool `advise`. Các lần gọi của nó bị từ chối.
 
 ## Phát triển
@@ -126,11 +133,13 @@ Một số tùy chọn của oh-my-pi không có tương đương trong opencode
 ```bash
 npm install
 npm run check      # typecheck, unit test, build
-npm run test:e2e   # cần binary opencode: OPENCODE_BIN=/đường/dẫn/opencode
-npm run test:pack  # cài tarball đã đóng gói qua opencode.json và chạy một review
+npm run test:e2e      # opencode 1.x; cần OPENCODE_BIN=/đường/dẫn/opencode
+npm run test:e2e:v2   # opencode 2.x; cần OPENCODE_BIN=/đường/dẫn/opencode
+npm run test:pack     # cài tarball đã đóng gói qua opencode.json (1.x) và chạy một review
+npm run test:pack:v2  # tương tự qua khóa "plugins" của 2.x
 ```
 
-Bộ E2E chạy `opencode serve` thật trong sandbox cô lập, nối tới một mock tương thích OpenAI có kịch bản, nên advisor và agent cư xử giống nhau ở mọi lần chạy. Dùng opencode 1.19.x cho phần này, vì bản 2.x có API khác.
+Bộ E2E chạy `opencode serve` thật trong sandbox cô lập, nối tới một mock tương thích OpenAI có kịch bản, nên advisor và agent cư xử giống nhau ở mọi lần chạy. Chạy bộ 1.x bằng binary opencode 1.19.x và bộ 2.x bằng binary opencode 2.x.
 
 ## Tác giả
 
