@@ -1145,5 +1145,68 @@ await scenario("level: a `:high` suffix on the advisor model is sent as the thin
   }
 })
 
+await scenario("fork: a forked session is reviewed from now on, not from the copied history", async (check) => {
+  const env = await makeEnv()
+  try {
+    const s = await env.newSession("origin")
+    await env.run(s.id, "FORK_HISTORY_MARK first turn")
+    await env.settle()
+    const fork = (await env.c.session.fork({ path: { id: s.id }, body: {} })).data
+    check("the fork was created", !!fork?.id, fork)
+    const mark = env.st.advisorCalls.length
+    await env.run(fork.id, "SECOND_TURN_MARK after the fork")
+    await env.settle()
+    const last = env.st.advisorCalls.slice(mark).join("\n")
+    check("the advisor saw the new turn", /SECOND_TURN_MARK/.test(last), last.slice(0, 200))
+    check("and not the copied history", !/FORK_HISTORY_MARK/.test(last), last.slice(0, 200))
+  } finally {
+    await env.stop()
+  }
+})
+
+await scenario("revert: rewriting the primary's history resets the advisor (a fresh advisor session)", async (check) => {
+  const env = await makeEnv()
+  try {
+    const s = await env.newSession("revert")
+    await env.run(s.id, "first turn")
+    await env.settle()
+    await env.run(s.id, "second turn")
+    await env.settle()
+    const before = (await env.children(s.id)).filter((k) => k.title.startsWith("[advisor]")).length
+    const msgs = (await env.c.session.messages({ path: { id: s.id } })).data
+    const firstUser = msgs.find((m) => m.info.role === "user")
+    await env.c.session.revert({ path: { id: s.id }, body: { messageID: firstUser.info.id } })
+    await env.settle(1500)
+    await env.run(s.id, "third turn after the revert")
+    await env.settle()
+    const after = (await env.children(s.id)).filter((k) => k.title.startsWith("[advisor]")).length
+    check("a new advisor session was opened", after === before + 1, [before, after])
+    check("the advisor was told its context was reset", env.st.advisorCalls.some((c) => /context was reset/.test(c)))
+  } finally {
+    await env.stop()
+  }
+})
+
+await scenario("no_model: a model missing from the catalog does not halt the advisor; setup recovers it", async (check) => {
+  const env = await makeEnv({ advisor: { model: "mock/ghost", controlModel: "mock/adv", immuneTurns: 0, reviewTimeoutMs: 30000, maxConsecutiveFailures: 1 } })
+  try {
+    const s = await env.newSession("ghost")
+    await env.run(s.id, "one")
+    await env.settle(2500, 30000)
+    await env.run(s.id, "two")
+    await env.settle(2500, 30000)
+    const st = await env.command(s.id, "status")
+    check("the advisor waits as no_model", /no_model/.test(st), st.slice(0, 600))
+    check("it is not halted", !/halted|\| failed \|/.test(st), st.slice(0, 600))
+    const ok = await env.command(s.id, "setup mock/adv")
+    check("setup acknowledged", /mock\/adv/.test(ok), ok)
+    await env.run(s.id, "three")
+    await env.settle()
+    check("reviews start on the real model", env.reviewStarts().some((r) => r.model === "adv"), env.reviewStarts().map((r) => r.model))
+  } finally {
+    await env.stop()
+  }
+})
+
 process.exitCode = R.summary() ? 1 : 0
 process.exit(process.exitCode)

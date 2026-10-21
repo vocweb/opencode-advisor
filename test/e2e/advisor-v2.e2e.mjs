@@ -789,5 +789,45 @@ await scenario("agents: the project's AGENTS.md reaches the advisor's system pro
   }
 })
 
+await scenario("fork: a forked session is reviewed from now on, not from the copied history", async (check) => {
+  const env = await makeEnvV2()
+  try {
+    const s = await env.newSession("origin")
+    await env.run(s.id, "FORK_HISTORY_MARK first turn")
+    await env.settle()
+    const fork = await env.c.session.fork({ sessionID: s.id })
+    check("the fork was created", !!fork?.id, fork)
+    const mark = env.st.advisorCalls.length
+    await env.run(fork.id, "SECOND_TURN_MARK after the fork")
+    await env.settle()
+    const last = env.st.advisorCalls.slice(mark).join("\n")
+    check("the advisor saw the new turn", /SECOND_TURN_MARK/.test(last), last.slice(0, 200))
+    check("and not the copied history", !/FORK_HISTORY_MARK/.test(last), last.slice(0, 200))
+  } finally {
+    await env.stop()
+  }
+})
+
+await scenario("no_model: a model missing from the catalog does not halt the advisor; setup recovers it", async (check) => {
+  const env = await makeEnvV2({ advisor: { model: "mock/ghost", immuneTurns: 0, reviewTimeoutMs: 30000, maxConsecutiveFailures: 1 } })
+  try {
+    const s = await env.newSession("ghost")
+    await env.run(s.id, "one")
+    await env.settle(2500, 30000)
+    await env.run(s.id, "two")
+    await env.settle(2500, 30000)
+    const st = await env.command(s.id, "status")
+    check("the advisor waits as no_model", /no_model/.test(st), st.slice(0, 600))
+    check("it is not halted", !/halted|\| failed \|/.test(st), st.slice(0, 600))
+    const ok = await env.command(s.id, "setup mock/adv")
+    check("setup acknowledged", /mock\/adv/.test(ok), ok)
+    await env.run(s.id, "three")
+    await env.settle()
+    check("reviews start on the real model", env.reviewStarts().some((r) => r.model === "adv"), env.reviewStarts().map((r) => r.model))
+  } finally {
+    await env.stop()
+  }
+})
+
 process.exitCode = R.summary() ? 1 : 0
 process.exit(process.exitCode)

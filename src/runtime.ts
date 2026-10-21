@@ -44,6 +44,9 @@ export interface RuntimeStats {
 // バッチを破棄するまでの試行回数 (バックオフ付き)。
 // Số lần thử mỗi batch trước khi bỏ batch (có backoff).
 const MAX_ATTEMPTS = 3
+// モデルが見つからないときの再試行間隔。カタログに後から現れる場合に備え、頻繁に叩かない。
+// Khoảng chờ trước khi thử lại khi chưa thấy model; phòng khi nó xuất hiện muộn trong danh mục nhưng cũng không gọi dồn dập.
+const NO_MODEL_RETRY_MS = 30_000
 const SYNC_WAIT_CAP_MS = 30_000
 // プロバイダのエラー名を保持し、利用上限や拒否を分類できるようにする。
 // Giữ tên lỗi của provider để phân loại (usage limit, refusal, ...).
@@ -121,6 +124,9 @@ export class AdvisorRuntime {
   private retryAbort: string | undefined
   private loopStopped = false
   private overBudget = false
+  /** After a model-not-found failure: do not try again before this time (the model may show up in the catalog later). */
+  private noModelRetryAt = 0
+  private warnedModelMissing = false
   private readonly guard: EmissionGuard
 
   constructor(private deps: RuntimeDeps) {
@@ -200,6 +206,8 @@ export class AdvisorRuntime {
     this.chain.onReset()
     if (this.status === "failed" || this.status === "no_model" || this.status === "quota_paused") this.status = this.paused ? "paused" : "idle"
     this.warnedNoModel = false
+    this.warnedModelMissing = false
+    this.noModelRetryAt = 0
     this.dormant = false
     this.wake()
     // クォータ枯渇中に保持したバッチをここで再試行する。
@@ -338,6 +346,7 @@ export class AdvisorRuntime {
 
   private kick(): void {
     if (this.running || this.paused || this.disposed) return
+    if (this.status === "no_model" && Date.now() < this.noModelRetryAt) return
     this.running = this.drain().finally(() => {
       this.running = undefined
       // A notify() may have raced with the end of the loop.
@@ -355,7 +364,9 @@ export class AdvisorRuntime {
   }
 
   private async drain(): Promise<void> {
-    while (this.dirty && !this.disposed && !this.paused && !this.halted()) {
+    // モデルが見つからない間は次の再試行時刻まで回さない。回すと失敗するレビューを即座に繰り返してしまう。
+    // Khi chưa thấy model thì không chạy lại cho tới giờ thử lại kế tiếp; nếu không sẽ lặp ngay một review đang thất bại.
+    while (this.dirty && !this.disposed && !this.paused && !this.halted() && Date.now() >= this.noModelRetryAt) {
       this.dirty = false
       const final = this.pendingFinal
       this.pendingFinal = false
@@ -396,9 +407,28 @@ export class AdvisorRuntime {
         this.lastError = errMessage(e)
         this.needsReprime = true // we cannot know what the advisor session absorbed
         const permanent = e instanceof ReviewError && e.permanent
-        const kind = classifyFailure(e instanceof ReviewError ? e.errName : "", this.lastError)
+        let kind = classifyFailure(e instanceof ReviewError ? e.errName : "", this.lastError)
+        // opencode v1 はモデル不明を「Unexpected server error」としか返さない。カタログを直接見て、無ければ no-model として扱う。
+        // opencode v1 chỉ trả "Unexpected server error" khi model không tồn tại; tra thẳng danh mục và nếu không có thì coi là no-model.
+        if (kind === "other") {
+          const cur = parseModelSelector(this.chain.current())
+          if (cur && (await this.deps.host.modelAvailable?.(cur.ref)) === false) kind = "no-model"
+        }
         const outcome = this.chain.onFailure(kind)
         log("warn", "advisor review failed", { advisor: this.spec.name, error: this.lastError, attempt, kind, outcome, model: this.chain.current() })
+        if (kind === "no-model" && outcome !== "switched") {
+          // モデルがまだ見つからない。halted にはせず、バッチを保持して一定時間後の次の境界で再試行する。
+          // Chưa tìm thấy model: không halt, giữ batch và thử lại ở ranh giới kế tiếp sau một khoảng thời gian.
+          this.dirty = true
+          this.pendingFinal = this.pendingFinal || final
+          this.status = "no_model"
+          this.noModelRetryAt = Date.now() + NO_MODEL_RETRY_MS
+          if (!this.warnedModelMissing) {
+            this.warnedModelMissing = true
+            this.toast(`Advisor "${this.spec.name}": model ${this.chain.current() ?? "?"} was not found. It will be tried again at a later boundary, or run /advisor setup <provider/model>.`, "warning")
+          }
+          return
+        }
         if (outcome === "exhausted") {
           // 使用量上限: バッチは捨てずに保持し、/advisor reset まで止める。
           // Hết quota: giữ nguyên batch, dừng đến khi /advisor reset.

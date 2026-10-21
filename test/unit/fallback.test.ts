@@ -94,3 +94,9 @@ test("fallback: with the never policy the runtime stays on the fallback it moved
   n.c.onReset()
   assert.equal(n.c.current(), "p/main")
 })
+
+test("fallback: a model that is not in the catalog is its own kind (v1 ProviderModelNotFoundError, v2 provider.no-route)", () => {
+  assert.equal(classifyFailure("ProviderModelNotFoundError", "Model not found: mock/ghost"), "no-model")
+  assert.equal(classifyFailure("provider.no-route", "Model unavailable: mock/ghost"), "no-model")
+  assert.equal(classifyFailure("APIError", "429 Too Many Requests"), "usage-limit", "other kinds are unchanged")
+})

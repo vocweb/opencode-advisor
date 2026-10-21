@@ -109,14 +109,15 @@ test("config: precedence of maxNotesPerUpdate; omp-only keys are ignored with a 
   const proj = path.join(home, "p")
   write(
     path.join(proj, "WATCHDOG.yml"),
-    "maxNotesPerUpdate: 7\nadvisor: {maxNotesPerUpdate: 2, mystery: 1}\nretry: {usageAwareFallback: true, maxDelayMs: 5}\ntier: {advisor: fast}\nadvisors:\n  - {name: A}\n  - {name: B, maxNotesPerUpdate: 9}\n",
+    "maxNotesPerUpdate: 7\nadvisor: {maxNotesPerUpdate: 2, mystery: 1}\nretry: {usageAwareFallback: true, maxDelayMs: 5}\ntier: {advisor: fast, other: 1}\nadvisors:\n  - {name: A}\n  - {name: B, maxNotesPerUpdate: 9}\n",
   )
   const c = load(home, proj)
   assert.equal(c.advisors.find((a) => a.name === "A")!.maxNotesPerUpdate, 7)
   assert.equal(c.advisors.find((a) => a.name === "B")!.maxNotesPerUpdate, 9)
   assert.equal(c.retry.maxDelayMs, 5)
   assert.ok(c.warnings.some((w) => w.includes('"retry.usageAwareFallback" is not supported by opencode-advisor; ignored')))
-  assert.ok(c.warnings.some((w) => w.includes('"tier.advisor" is not supported')))
+  assert.ok(c.warnings.some((w) => w.includes("tier.advisor must be")), "an unknown tier value is reported")
+  assert.ok(c.warnings.some((w) => w.includes('"tier.other" is not supported')))
   assert.ok(c.warnings.some((w) => w.includes('unknown key "advisor.mystery"')))
 })
 
@@ -313,4 +314,27 @@ test("config: a project file that picks the advisor model or fallback chain is f
   const w = load(home, proj).warnings.filter((x) => /chooses the advisor model/.test(x))
   assert.equal(w.length, 1)
   assert.match(w[0]!, /modelRoles\.advisor=x\/y.*advisors\[A\]\.model=z\/w.*retry\.fallbackChains/)
+})
+
+test("config: outside Git with exactly one child repository, the advisor is told which project is active", () => {
+  const home = tmp()
+  const work = path.join(home, "work")
+  fs.mkdirSync(path.join(work, "app/.git"), { recursive: true })
+  fs.mkdirSync(path.join(work, "notes"), { recursive: true })
+  assert.match(load(home, work).watchdog, /only child repository is `app\/`/)
+  fs.mkdirSync(path.join(work, "lib/.git"), { recursive: true })
+  assert.doesNotMatch(load(home, work).watchdog, /child repository/, "two child repositories: no guess")
+  assert.doesNotMatch(load(home, path.join(work, "app")).watchdog, /child repository/, "inside a repository: no block")
+})
+
+test("config: tier.advisor accepts none, inherit and the concrete tiers; the nearer file wins; the default is none", () => {
+  const home = tmp()
+  const proj = path.join(home, "p")
+  assert.equal(load(home, proj).serviceTier, "none")
+  write(path.join(home, "xdg/opencode/WATCHDOG.yml"), "tier: {advisor: flex}\n")
+  assert.equal(load(home, proj).serviceTier, "flex")
+  write(path.join(proj, ".opencode/WATCHDOG.yml"), "tier: {advisor: inherit}\n")
+  const c = load(home, proj)
+  assert.equal(c.serviceTier, "inherit")
+  assert.deepEqual(c.warnings.filter((w) => /tier/.test(w)), [])
 })

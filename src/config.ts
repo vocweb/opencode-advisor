@@ -3,6 +3,7 @@ import os from "node:os"
 import path from "node:path"
 import { parse as parseYaml } from "yaml"
 import { SEVERITIES, type Severity } from "./types.ts"
+import { childRepositoryBlock } from "./childrepo.ts"
 import { isSecretPath } from "./policy.ts"
 import { slugify } from "./util.ts"
 
@@ -52,6 +53,8 @@ export interface AdvisorConfig {
   // Trần số lần ngắt mỗi prompt, chặn vòng lặp qua lại giữa advisor và agent.
   maxSteersPerPrompt: number
   syncBacklog: SyncBacklog
+  /** "none" (standard processing), "inherit" (follow the primary) or a concrete tier. */
+  serviceTier: string
   // 最終回答後はこの重大度以上だけが再起動させ、未満はカードにする。
   // Sau câu trả lời cuối chỉ note từ mức này mới đánh thức agent, thấp hơn thành card.
   continueSeverity: Severity
@@ -111,8 +114,13 @@ export const DEFAULT_RETRY: RetryConfig = {
   fallbackChains: {},
 }
 
+// advisor の service tier として指定できる具体値。実際に付けるのは対応する provider だけ (README 参照)。
+// Các giá trị service tier cụ thể có thể chỉ định; chỉ áp cho provider có hỗ trợ (xem README).
+export const SERVICE_TIERS: Record<string, true> = { auto: true, default: true, flex: true, scale: true, priority: true, ultrafast: true }
+
 export const DEFAULTS = {
   enabled: true,
+  serviceTier: "none",
   maxNotesPerUpdate: 4,
   immuneTurns: 3,
   maxSteersPerPrompt: 6,
@@ -373,7 +381,15 @@ function parseLayer(root: Obj, file: string, warnings: string[], home: string, c
   else if (root.modelRoles !== undefined) warnings.push(`${file}: "modelRoles" must be a mapping; ignored`)
 
   if (isObj(root.tier)) {
-    for (const k of Object.keys(root.tier)) warnings.push(`${file}: "tier.${k}" is not supported by opencode-advisor; ignored`)
+    for (const k of Object.keys(root.tier)) {
+      if (k !== "advisor") {
+        warnings.push(`${file}: "tier.${k}" is not supported by opencode-advisor; ignored`)
+        continue
+      }
+      const v = typeof root.tier.advisor === "string" ? root.tier.advisor.trim().toLowerCase() : ""
+      if (v === "none" || v === "inherit" || Object.hasOwn(SERVICE_TIERS, v)) layer.advisor.serviceTier = v
+      else warnings.push(`${file}: tier.advisor must be none, inherit, ${Object.keys(SERVICE_TIERS).join(", ")}; ignored`)
+    }
   }
 
   if (root.advisor !== undefined) {
@@ -650,7 +666,9 @@ export function loadConfig(opts: LoadOptions): AdvisorConfig {
     retry,
     agentAdvisor,
     instructions: instructions.join("\n\n"),
-    watchdog: wd.map((w) => w.content).join("\n\n"),
+    // cwd が Git の外で子リポジトリがちょうど 1 つなら、どれが対象かを advisor に伝える (omp と同じ)。
+    // Nếu cwd ngoài Git và có đúng một repo con thì báo cho advisor biết đâu là project đang làm (giống omp).
+    watchdog: [...wd.map((w) => w.content), childRepositoryBlock(opts.directory)].filter(Boolean).join("\n\n"),
     advisors: specs,
     warnings,
     sources,

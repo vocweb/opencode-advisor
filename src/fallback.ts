@@ -1,14 +1,18 @@
 import type { RetryConfig } from "./config.ts"
 import { parseModelSelector } from "./util.ts"
 
-export type FailureKind = "usage-limit" | "refusal" | "other"
+export type FailureKind = "usage-limit" | "refusal" | "no-model" | "other"
 export type FailureOutcome = "switched" | "stay" | "exhausted"
 
 const USAGE_RE = /usage.?limit|quota|rate.?limit|too many requests|429|insufficient/i
 const REFUSAL_RE = /refus/i
+// モデルがカタログにまだ無い (後から現れるかもしれない) 場合。他の失敗と違い、待てば直る可能性がある。
+// Model chưa có trong danh mục (có thể xuất hiện muộn); khác các lỗi khác, chờ có thể tự hết.
+const NO_MODEL_RE = /ModelNotFound|no-route|Model unavailable|model\b.{0,40}\bnot found|unknown model|no such model|model\b.{0,40}\bnot available/i
 
 export function classifyFailure(name: string, message: string): FailureKind {
   const text = `${name} ${message}`
+  if (NO_MODEL_RE.test(text)) return "no-model"
   if (USAGE_RE.test(text)) return "usage-limit"
   if (REFUSAL_RE.test(text)) return "refusal"
   return "other"

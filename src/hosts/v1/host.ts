@@ -109,6 +109,16 @@ export function createV1Host(client: V1Client, log: Logger): Host {
 
     // 要約に失敗したら false を返し、呼び出し側が作り直す。要約はモデル呼び出しを伴うので、失敗しても例外にはしない。
     // Tóm tắt thất bại thì trả false để bên gọi dựng lại session; việc tóm tắt cần gọi model nên không ném lỗi khi thất bại.
+    async modelAvailable(model) {
+      try {
+        const data = unwrap<{ providers: { id: string; models: Record<string, unknown> }[] }>(await client.config.providers())
+        const provider = data.providers.find((p) => p.id === model.providerID)
+        return !!provider && Object.hasOwn(provider.models ?? {}, model.modelID)
+      } catch {
+        return undefined
+      }
+    },
+
     async compactAdvisor(id, model) {
       try {
         unwrap(await client.session.summarize({ path: { id }, body: { providerID: model.providerID, modelID: model.modelID } } as any))

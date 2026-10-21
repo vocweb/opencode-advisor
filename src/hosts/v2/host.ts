@@ -92,9 +92,21 @@ export function createV2Host(ctx: V2Ctx, log: Logger): Host {
       // 中断された実行は error なしで idle(interrupted) だけが残ることがある。
       // Lượt bị ngắt có thể chỉ để lại idle(interrupted) mà không có error.
       if (tail?.type === "idle" && tail.outcome && tail.outcome !== "succeeded") {
+        // idle の error (例: provider.no-route "Model unavailable") が本当の原因。あればそれを使い、無ければ outcome だけを返す。
+        // error của idle (ví dụ provider.no-route "Model unavailable") mới là nguyên nhân thật; có thì dùng, không thì chỉ báo outcome.
+        if (tail.error) return { id: a?.id, error: { name: String(tail.error.type ?? "ExecutionFailed"), message: String(tail.error.message ?? tail.outcome) } }
         return { id: a?.id, error: { name: tail.outcome === "interrupted" ? "MessageAbortedError" : "ExecutionFailed", message: String(tail.outcome) } }
       }
       return { id: a?.id, cost: a?.cost, tokens: a?.tokens }
+    },
+
+    async modelAvailable(model) {
+      try {
+        const list = (await ctx.model.list()) as unknown as { providerID?: string; id?: string }[]
+        return Array.isArray(list) ? list.some((m) => m.providerID === model.providerID && m.id === model.modelID) : undefined
+      } catch {
+        return undefined
+      }
     },
 
     async abort(id) {

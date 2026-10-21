@@ -5,6 +5,7 @@ import type { Host } from "./host.ts"
 import type { LoopVerdict } from "./loopguard.ts"
 import { agentNameFor } from "./policy.ts"
 import { renderAdvisories } from "./prompts.ts"
+import { resolveServiceTier } from "./tier.ts"
 import { Registry } from "./registry.ts"
 import { AdvisorRuntime } from "./runtime.ts"
 import { SEVERITY_RANK, type Note } from "./types.ts"
@@ -248,6 +249,28 @@ export class AdvisorCore {
     if (!this.registry.isAdvisorSession(id)) this.delivery.onAbort(id)
   }
 
+  /** The session's history was rewritten (revert, move): the cursor points into history that no longer exists. */
+  historyRewritten(id: string): void {
+    this.compacted(id)
+  }
+
+  /** A forked session starts from a copy of someone else's history; review only what happens from now on, not the copy. */
+  sessionForked(id: string, createdAt?: number): void {
+    this.registry.fresh.delete(id)
+    if (createdAt !== undefined) this.forkedAt.set(id, createdAt)
+  }
+
+  private forkedAt = new Map<string, number>()
+
+  /**
+   * A message that already existed when the session was forked arrives again as an event right after the fork is created
+   * (opencode copies the history). It is not new work, so it must not trigger a review.
+   */
+  isCopiedMessage(id: string, messageCreated: number | undefined): boolean {
+    const forked = this.forkedAt.get(id)
+    return forked !== undefined && messageCreated !== undefined && messageCreated < forked
+  }
+
   compacted(id: string): void {
     this.runtimes.get(id)?.forEach((r) => r.reset())
     // 圧縮で履歴が要約に置き換わるので、古い内容を前提にした助言は捨てる。
@@ -275,6 +298,21 @@ export class AdvisorCore {
     if (waiting.length === 0) return
     await Promise.all(waiting.map((r) => r.waitCaughtUp(r.spec.syncBacklog, this.delivery.abortSignal(id))))
     await this.delivery.flushNow(id, true)
+  }
+
+  // primary が最後に送った service tier。advisor の tier が "inherit" のときに写す。
+  // Service tier primary gửi gần nhất; dùng khi tier của advisor là "inherit".
+  private primaryTiers = new Map<string, string>()
+
+  noteServiceTier(primarySessionID: string, tier: unknown): void {
+    if (typeof tier === "string" && tier) this.primaryTiers.set(primarySessionID, tier)
+    else this.primaryTiers.delete(primarySessionID)
+  }
+
+  /** The service tier to put on a request of this advisor session, or undefined. */
+  advisorServiceTier(advisorSessionID: string, providerID: string): string | undefined {
+    const parent = this.registry.meta.get(advisorSessionID)?.parentID
+    return resolveServiceTier(this.cfg.serviceTier, providerID, parent ? this.primaryTiers.get(parent) : undefined)
   }
 
   /** Loop guard entry point for both hosts: the verdict for one investigative tool call of an advisor session. */

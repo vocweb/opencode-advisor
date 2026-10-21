@@ -239,3 +239,22 @@ test("model selector: `:auto` is a level word, so `provider/model:auto` splits i
   assert.deepEqual(parseModelSelector("a/b:high")?.level, "high")
   assert.equal(parseModelSelector("a/b:nonsense")?.level, undefined, "an unknown suffix stays part of the model id")
 })
+
+test("render: plan-mode reminders keep their text as primary context (once), other system reminders collapse to one line, attached-file context is untouched", () => {
+  const user = (id: string, ...parts: Record<string, unknown>[]) => ({ info: { id, role: "user", time: { created: 1 } }, parts }) as unknown as Msg
+  const plan = "<system-reminder>\nPlan mode is active. Do not edit files.\n</system-reminder>"
+  const other = "<system-reminder>\nThe todo list is empty and has not been used in a while. Consider adding tasks.\n</system-reminder>"
+  const out = renderDelta(
+    [
+      user("u1", { type: "text", text: "do the thing" }, { type: "text", text: plan, synthetic: true }, { type: "text", text: other, synthetic: true }),
+      user("u2", { type: "text", text: "again" }, { type: "text", text: plan, synthetic: true }),
+      user("u3", { type: "text", text: "Called the Read tool: file contents here", synthetic: true }, { type: "text", text: "read it" }),
+    ],
+    OPTS,
+  )
+  assert.equal(out.match(/<primary-context kind="plan-mode">/g)?.length, 1, "the same plan-mode text is shown once")
+  assert.match(out, /Plan mode is active\. Do not edit files\./)
+  assert.match(out, /<hidden>The todo list is empty and has not been used in a while\. Consider adding tasks\.<\/hidden>/)
+  assert.match(out, /file contents here/, "synthetic text that is not a system reminder (attached files) stays")
+  assert.match(out, /<user id="u1">\ndo the thing\n<\/user>/, "the user's own words are unchanged")
+})

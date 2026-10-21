@@ -223,6 +223,10 @@ async function startV2(ctx: V2Ctx, directory: string, loadKey: string): Promise<
     ctx.session.hook("context", async (ev: any) => {
       const sid = String(ev.sessionID)
       if (core.isAdvisorSession(sid)) {
+        // advisor の request に service tier を付ける (対応する provider のときだけ)。
+        // Gắn service tier vào request của advisor (chỉ khi provider có hỗ trợ).
+        const tier = core.advisorServiceTier(sid, String(ev.model?.providerID ?? ""))
+        if (tier) ev.options.serviceTier = tier
         // 古い調査ツールの出力はスタブにする。モデルへ送る写しだけを変える。
         // Output cũ của tool điều tra được thay bằng stub; chỉ đổi bản gửi model.
         scrubV2(ev.messages)
@@ -232,6 +236,7 @@ async function startV2(ctx: V2Ctx, directory: string, loadKey: string): Promise<
       // advise は advisor 専用。他の agent には見せない。
       // advise chỉ dành cho advisor; các agent khác không được thấy.
       if (!String(ev.agent ?? "").startsWith("advisor-")) delete ev.tools?.advise
+      core.noteServiceTier(sid, ev.options?.serviceTier)
       if (!(await isMine(sid))) return
       // 直前の step が終わっていれば、イベントより先にここで通知して syncBacklog の待ちに間に合わせる。
       // Nếu step trước đã xong thì báo ngay tại đây, trước cả sự kiện, để syncBacklog kịp chờ.
@@ -362,6 +367,13 @@ async function startV2(ctx: V2Ctx, directory: string, loadKey: string): Promise<
         return
       case "session.compaction.ended":
         core.compacted(id)
+        return
+      case "session.revert.committed":
+      case "session.moved":
+        core.historyRewritten(id)
+        return
+      case "session.forked":
+        core.sessionForked(id)
         return
       case "session.inbox.enqueued":
         if (d.item?.type === "user") core.realUserMessage(id)

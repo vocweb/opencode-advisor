@@ -59,6 +59,11 @@ export interface Host {
    * Returns false when the host cannot do it or it failed; the caller then re-primes. Absent on hosts without a usable summarize.
    */
   compactAdvisor?(sessionID: string, model: ModelRef): Promise<boolean>
+  /**
+   * Whether the host's model catalog contains `model`; undefined when that cannot be determined.
+   * Used to tell "the model does not exist (yet)" from other failures, because some hosts report it only as an opaque error.
+   */
+  modelAvailable?(model: ModelRef): Promise<boolean | undefined>
   /** Sessions created for the advisors of `primaryID`, oldest first (for status/dump and restarts). */
   advisorChildren(primaryID: string): Promise<AdvisorChild[]>
 
