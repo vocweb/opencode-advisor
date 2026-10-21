@@ -661,7 +661,9 @@ export function loadConfig(opts: LoadOptions): AdvisorConfig {
   return {
     ...s,
     maxNotesPerUpdate: notesDefault,
-    controlModel: controlModel ?? specs.find((x) => x.enabled && x.model && x.model !== "inherit")?.model,
+    // 明示されたときだけ使う。advisor のモデルを流用すると、そのモデルが無い場合に /advisor 自体が動かなくなる。
+    // Chỉ dùng khi được chỉ định tường minh; mượn model của advisor thì khi model đó không tồn tại, chính /advisor cũng hỏng.
+    controlModel,
     defaultModel: modelRole,
     retry,
     agentAdvisor,

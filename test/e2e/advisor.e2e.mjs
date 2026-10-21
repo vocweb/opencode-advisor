@@ -1188,13 +1188,20 @@ await scenario("revert: rewriting the primary's history resets the advisor (a fr
 })
 
 await scenario("no_model: a model missing from the catalog does not halt the advisor; setup recovers it", async (check) => {
-  const env = await makeEnv({ advisor: { model: "mock/ghost", controlModel: "mock/adv", immuneTurns: 0, reviewTimeoutMs: 30000, maxConsecutiveFailures: 1 } })
+  const env = await makeEnv({ advisor: { model: "mock/ghost", immuneTurns: 0, reviewTimeoutMs: 30000, maxConsecutiveFailures: 1 } })
   try {
     const s = await env.newSession("ghost")
     await env.run(s.id, "one")
     await env.settle(2500, 30000)
     await env.run(s.id, "two")
     await env.settle(2500, 30000)
+    // 待機中に失敗するレビューを回し続けていないこと (2 回の測定の間に失敗ログが増えない)。
+    // Không được liên tục chạy lại review thất bại trong lúc chờ (số log thất bại không tăng giữa hai lần đo).
+    const failed = () => env.oc.logs.join("").split("\n").filter((l) => /advisor review failed/.test(l)).length
+    const f1 = failed()
+    await sleep(2500)
+    const f2 = failed()
+    check("it does not keep retrying while it waits", f1 === f2 && f1 <= 6, [f1, f2])
     const st = await env.command(s.id, "status")
     check("the advisor waits as no_model", /no_model/.test(st), st.slice(0, 600))
     check("it is not halted", !/halted|\| failed \|/.test(st), st.slice(0, 600))

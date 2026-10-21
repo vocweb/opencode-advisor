@@ -196,7 +196,9 @@ export async function createV1Hooks(input: PluginInput): Promise<Hooks> {
           template: CONTROL_TEXT,
           description: COMMAND_DESCRIPTION,
           agent: CONTROL_AGENT,
-          ...(parseModel(cfg.controlModel) ? { model: cfg.controlModel } : {}),
+          // 明示の controlModel、なければ small_model (安価で、通常は実在する)。どちらも無ければ session のモデルを使う。
+          // controlModel tường minh, nếu không thì small_model (rẻ và thường có thật); không có cả hai thì dùng model của session.
+          ...(parseModel(cfg.controlModel ?? conf.small_model) ? { model: cfg.controlModel ?? conf.small_model } : {}),
           subtask: false,
         }
       }
