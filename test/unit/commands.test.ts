@@ -21,7 +21,7 @@ function setup() {
   const env = { XDG_CONFIG_HOME: path.join(home, "xdg") }
   const cfg = loadConfig({ directory: project, home, env })
   const applied: string[] = []
-  const host = { kind: "v1", log: () => {}, advisorChildren: async () => [], transcript: async () => [] } as unknown as Host
+  const host = { log: () => {}, advisorChildren: async () => [], transcript: async () => [] } as unknown as Host
   const ctx: CommandCtx = {
     cfg,
     specs: cfg.advisors,

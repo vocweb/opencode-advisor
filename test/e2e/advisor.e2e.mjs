@@ -999,5 +999,65 @@ await scenario("tools: a granted mutating tool follows the user's permission pol
   }
 })
 
+await scenario("strict: a nit found while the primary waits is already in the primary's next LLM request", async (check) => {
+  const env = await makeEnv({ advisor: { model: "mock/adv", immuneTurns: 0, reviewTimeoutMs: 30000, syncBacklog: "strict" } })
+  try {
+    env.st.mainDelay = 100
+    let sent = false
+    env.st.advisorPlan = (ctx, upd) => {
+      if (!sent && /STRICT_ME/.test(upd)) {
+        sent = true
+        return { delayMs: 600, toolCalls: [adviseCall("STRICT_NOTE: prefer the named constant over the literal 30.", "nit")] }
+      }
+      return { text: "No findings." }
+    }
+    const s = await env.newSession("strict-note")
+    await env.run(s.id, "RUN_STEPS:2 STRICT_ME")
+    await env.settle(2500)
+    const second = env.mainReqs()[1]
+    check("the primary made a second request", !!second, env.mainReqs().length)
+    check("the aside is already in that request, not one request later", /STRICT_NOTE/.test(JSON.stringify(second?.messages ?? [])), second && JSON.stringify(second.messages).slice(-300))
+  } finally {
+    await env.stop()
+  }
+})
+
+await scenario("fallback: when every model refuses, the number of advisor requests stays bounded", async (check) => {
+  const env = await makeEnv({ advisor: { model: "mock/adv", immuneTurns: 0, reviewTimeoutMs: 30000, retry: { fallbackChains: { advisor: ["mock/alt"] }, maxDelayMs: 600000 } } })
+  try {
+    env.st.advisorPlan = () => ({ status: 400, body: "the model refused the request" })
+    const s = await env.newSession("refuse")
+    await env.run(s.id, "hello")
+    await env.settle(4000, 30000)
+    const n = env.advisorReqs().length
+    check("a bounded number of attempts (no endless switching)", n >= 2 && n <= 8, n)
+    check("the primary still answered", /plain reply/.test(JSON.stringify((await env.transcript(s.id)).filter((m) => m.info.role === "assistant").at(-1))))
+  } finally {
+    await env.stop()
+  }
+})
+
+await scenario("scrub: grep results from a secret file never reach the advisor model; other files do", async (check) => {
+  const env = await makeEnv({
+    advisor: { model: "mock/adv", immuneTurns: 0, reviewTimeoutMs: 30000, advisors: [{ name: "Digger", tools: ["read", "grep"] }] },
+    projectFiles: { ".env": "DB_PASSWORD=LEAK_MARKER_9f8e7d6c\n", "src/ok.txt": "OK_MARKER visible line\n" },
+  })
+  try {
+    env.st.advisorPlan = (ctx) => {
+      if (ctx.messages.some((m) => m.role === "tool")) return { text: "No findings." }
+      return { toolCalls: [{ name: "grep", args: { pattern: "_MARKER", path: env.oc.dir } }] }
+    }
+    const s = await env.newSession("scrub")
+    await env.run(s.id, "hello")
+    await env.settle(3000)
+    const seen = env.advisorReqs().flatMap((r) => r.messages.filter((m) => m.role === "tool").map((m) => JSON.stringify(m.content))).join("\n")
+    check("the advisor did get a grep result", seen.length > 0, seen)
+    check("a match in a normal file is visible", /OK_MARKER/.test(seen), seen)
+    check("a match in .env is not", !/LEAK_MARKER/.test(seen), seen)
+  } finally {
+    await env.stop()
+  }
+})
+
 process.exitCode = R.summary() ? 1 : 0
 process.exit(process.exitCode)
