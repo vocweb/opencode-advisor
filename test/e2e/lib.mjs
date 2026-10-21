@@ -98,7 +98,11 @@ export async function makeEnv(opts = {}) {
     /** advisor review starts (requests whose last message is not a tool result) */
     reviewStarts: () => mock.requests.filter((r) => r.tools.includes("advise") && r.messages.at(-1).role !== "tool"),
     mainReqs: () => mock.requests.filter((r) => !r.tools.includes("advise") && r.tools.length > 0),
-    newSession: async (title = "t") => (await c.session.create({ body: { title } })).data,
+    newSession: async (title = "t") => {
+      const r = await c.session.create({ body: { title } })
+      if (!r.data) throw new Error(`session.create failed: ${JSON.stringify(r.error)} status=${r.response?.status}`)
+      return r.data
+    },
     /** run a primary prompt to completion */
     run: async (id, text, extra = {}) => {
       const r = await c.session.prompt({ path: { id }, body: { parts: [{ type: "text", text }], ...extra } })
