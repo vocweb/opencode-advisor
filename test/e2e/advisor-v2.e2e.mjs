@@ -47,6 +47,21 @@ await scenario("delta: the advisor gets the user prompt, and later reviews only 
   }
 })
 
+await scenario("reasoning: the primary's reasoning part reaches the advisor's update (G3)", async (check) => {
+  const env = await makeEnvV2()
+  try {
+    env.st.mainPlan = () => ({ reasoning: "REASON_MARK thinking it through", text: "plain reply" })
+    const s = await env.newSession("reasoning")
+    await env.run(s.id, "REASON_PROMPT please")
+    await env.settle()
+    const upd = env.st.advisorCalls.join("\n")
+    check("the advisor reviewed", env.st.advisorCalls.length > 0)
+    check("the update carries the reasoning text", /<reasoning>[^<]*REASON_MARK/.test(upd), upd.slice(0, 400))
+  } finally {
+    await env.stop()
+  }
+})
+
 await scenario("steer: a blocker found mid-run is injected into the running turn", async (check) => {
   const env = await makeEnvV2()
   try {
