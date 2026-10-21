@@ -1,6 +1,6 @@
 // E2E harness: a scripted OpenAI-compatible mock LLM + a real `opencode serve` process.
 import http from "node:http"
-import { spawn } from "node:child_process"
+import { execFileSync, spawn } from "node:child_process"
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
@@ -8,6 +8,11 @@ import { createOpencodeClient } from "@opencode-ai/sdk"
 import { stringify as yamlStringify } from "yaml"
 
 export const OPENCODE_BIN = process.env.OPENCODE_BIN || "opencode"
+
+// v1 の harness を v2 の binary で動かすと 405 などで不可解に落ちるため、最初に版を確認して明確なエラーにする。
+// Chạy harness v1 với binary v2 sẽ lỗi khó hiểu (405...), nên kiểm phiên bản trước và báo lỗi rõ ràng.
+const binVersion = execFileSync(OPENCODE_BIN, ["--version"], { encoding: "utf8" }).trim()
+if (!/^(opencode )?v?1\./.test(binVersion)) throw new Error(`The v1 E2E suite needs an opencode 1.x binary (OPENCODE_BIN), got "${binVersion}". Use test:e2e:v2 for 2.x.`)
 
 export const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 

@@ -4,3 +4,4 @@ dist/
 docs/prompt
 # local planning notes
 plans/
+.DS_Store
