@@ -1,20 +1,46 @@
+import { claimLoad, releaseLoad } from "./load-guard.ts"
+import fs from "node:fs"
+import path from "node:path"
 import { COMMAND_DESCRIPTION } from "../../commands.ts"
 import { loadConfig } from "../../config.ts"
 import { AdvisorCore } from "../../core.ts"
 import type { Logger } from "../../host.ts"
-import { agentNameFor, EVICTED, isEvictableTool } from "../../policy.ts"
+import { LOOP_REMINDER, LOOP_STOPPED } from "../../loopguard.ts"
+import { agentNameFor, EVICTED, isEvictableTool, scrubSecretOutput } from "../../policy.ts"
+import { redact } from "../../redact.ts"
 import { ADVISE_TOOL_DESCRIPTION, buildAdvisorSystemPrompt, PRIMARY_EXPLAINER } from "../../prompts.ts"
 import { ensureStarterConfig } from "../../setup.ts"
 import { SELF_MARK } from "../../types.ts"
 import { errMessage } from "../../util.ts"
-import { createV2Host, type V2Ctx } from "./host.ts"
+import { createV2Host, type LooseCtx, type V2Ctx } from "./host.ts"
 import { advisorRules, type V2Rule } from "./permission.ts"
 
 const TESTED_WITH = "2.1"
 
-/** True when `ctx` is the full v2 plugin context. opencode 1.x also calls `setup` and passes a partial one. */
-export function isV2Context(ctx: V2Ctx | undefined): boolean {
-  return !!ctx && !!ctx.location && typeof ctx.session?.hook === "function" && typeof ctx.event?.subscribe === "function" && typeof ctx.tool?.transform === "function"
+// setup が必須とする v2 のメンバー。1 つでも欠けたら動かさず、何が欠けたかを必ず log に残す。
+// Các thành viên v2 mà setup bắt buộc; thiếu một cái là không chạy, nhưng luôn ghi log cái nào thiếu.
+const REQUIRED_MEMBERS: [string, (c: LooseCtx) => unknown][] = [
+  ["location", (c) => c.location],
+  ["session.hook", (c) => c.session?.hook],
+  ["session.context", (c) => c.session?.context],
+  ["session.create", (c) => c.session?.create],
+  ["session.prompt", (c) => c.session?.prompt],
+  ["session.synthetic", (c) => c.session?.synthetic],
+  ["event.subscribe", (c) => c.event?.subscribe],
+  ["tool.transform", (c) => c.tool?.transform],
+  ["agent.transform", (c) => c.agent?.transform],
+]
+
+export function missingV2Members(ctx: LooseCtx | undefined): string[] {
+  return REQUIRED_MEMBERS.filter(([name, get]) => {
+    const v = ctx ? get(ctx) : undefined
+    return name === "location" ? !v : typeof v !== "function"
+  }).map(([name]) => name)
+}
+
+/** opencode 1.x also calls `setup` with a partial context; this tells whether `ctx` at least looks like a 2.x one. */
+export function looksLikeV2(ctx: LooseCtx | undefined): boolean {
+  return !!ctx && (!!ctx.location || typeof ctx.session?.hook === "function" || typeof ctx.event?.subscribe === "function" || String(ctx.app?.version ?? "").startsWith("2"))
 }
 
 // 隠れた session を 1 つ作るたびに log が増えないよう、info/debug は環境変数があるときだけ出す。
@@ -27,11 +53,43 @@ function makeLogger(): Logger {
   }
 }
 
+// symlink や大文字小文字の違いで同じ directory を別物と見なさないよう、実体のパスに揃えて比べる。
+// Quy về đường dẫn thật trước khi so sánh để symlink hay khác biệt hoa thường không làm hai directory giống nhau thành khác nhau.
+function normalizeDir(p: string): string {
+  try {
+    return fs.realpathSync.native(p)
+  } catch {
+    return path.resolve(p)
+  }
+}
+
 /** The plugin for opencode 2.x. Everything outside this module is shared with 1.x through AdvisorCore. */
 export async function setupV2(ctx: V2Ctx): Promise<(() => void) | void> {
-  const log = makeLogger()
   const directory = String(ctx.location.directory)
-  const cfg = loadConfig({ directory, worktree: ctx.location.project?.directory ? String(ctx.location.project.directory) : undefined })
+  // 同じ directory に plugin が二重に読み込まれると review が二重になる。先に読み込まれた方だけを動かす。
+  // Nếu plugin bị nạp hai lần cho cùng một directory thì review sẽ chạy đôi; chỉ để bản nạp trước hoạt động.
+  const loadKey = normalizeDir(directory)
+  if (!claimLoad(loadKey)) {
+    makeLogger()("warn", `the advisor is already loaded for ${directory} (listed twice in the plugin config?); ignoring the second load`)
+    return
+  }
+  try {
+    const cleanup = await startV2(ctx, directory, loadKey)
+    // 無効化などで cleanup が無いときは、再度の読み込みができるよう目印を外す。
+    // Khi không có cleanup (ví dụ plugin bị tắt) thì gỡ dấu để lần nạp sau vẫn chạy được.
+    if (!cleanup) releaseLoad(loadKey)
+    return cleanup
+  } catch (e) {
+    releaseLoad(loadKey)
+    throw e
+  }
+}
+
+async function startV2(ctx: V2Ctx, directory: string, loadKey: string): Promise<(() => void) | void> {
+  const log = makeLogger()
+  const worktree = ctx.location.project?.directory ? String(ctx.location.project.directory) : undefined
+  const sameDir = (d: string | undefined): boolean => d !== undefined && normalizeDir(d) === loadKey
+  const cfg = loadConfig({ directory, worktree })
   for (const w of cfg.warnings) log("warn", w)
   if (!cfg.enabled) {
     log("info", "advisor disabled by configuration")
@@ -45,7 +103,7 @@ export async function setupV2(ctx: V2Ctx): Promise<(() => void) | void> {
   else if (starter.error) log("warn", `could not create starter config: ${starter.error}`)
 
   const host = createV2Host(ctx, log)
-  const core = new AdvisorCore({ host, cfg, directory, worktree: undefined })
+  const core = new AdvisorCore({ host, cfg, directory, worktree })
   const { registry, specs } = core
   const stop = new AbortController()
 
@@ -63,11 +121,11 @@ export async function setupV2(ctx: V2Ctx): Promise<(() => void) | void> {
       // Session lần đầu thấy có thể đã lỡ sự kiện tạo (plugin chỉ nạp khi project được dùng lần đầu); đăng ký luôn tại đây.
       const info = await host.sessionInfo(id)
       dir = dir ?? info.directory
-      if (dir === directory) core.sessionUpdated({ id, parentID: info.parentID, title: info.title })
+      if (sameDir(dir)) core.sessionUpdated({ id, parentID: info.parentID, title: info.title })
     } catch {
       if (dir === undefined) return false
     }
-    const ok = dir === directory
+    const ok = sameDir(dir)
     mine.set(id, ok)
     return ok
   }
@@ -165,19 +223,29 @@ export async function setupV2(ctx: V2Ctx): Promise<(() => void) | void> {
     ctx.session.hook("context", async (ev: any) => {
       const sid = String(ev.sessionID)
       if (core.isAdvisorSession(sid)) {
+        // advisor の request に service tier を付ける (対応する provider のときだけ)。
+        // Gắn service tier vào request của advisor (chỉ khi provider có hỗ trợ).
+        const tier = core.advisorServiceTier(sid, String(ev.model?.providerID ?? ""))
+        if (tier) ev.options.serviceTier = tier
         // 古い調査ツールの出力はスタブにする。モデルへ送る写しだけを変える。
         // Output cũ của tool điều tra được thay bằng stub; chỉ đổi bản gửi model.
+        scrubV2(ev.messages)
         if (cfg.evictStaleResults) evictV2(ev.messages)
         return
       }
       // advise は advisor 専用。他の agent には見せない。
       // advise chỉ dành cho advisor; các agent khác không được thấy.
       if (!String(ev.agent ?? "").startsWith("advisor-")) delete ev.tools?.advise
+      core.noteServiceTier(sid, ev.options?.serviceTier)
       if (!(await isMine(sid))) return
       // 直前の step が終わっていれば、イベントより先にここで通知して syncBacklog の待ちに間に合わせる。
       // Nếu step trước đã xong thì báo ngay tại đây, trước cả sự kiện, để syncBacklog kịp chờ.
       const lastAssistant = [...ev.messages].reverse().find((m: any) => m.role === "assistant")
-      if (lastAssistant?.id) stepEnded(sid, String(lastAssistant.id), lastAssistant.content?.some((c: any) => c?.type === "tool-call") ? "tool-calls" : "stop")
+      // hook の messages には finish が無い。tool 呼び出しで終わった step だけは確実に「途中」と言えるので、その場合だけ通知する。
+      // Message trong hook không có finish; chỉ step kết thúc bằng tool-call mới chắc chắn là đang giữa lượt nên chỉ báo trong trường hợp đó.
+      // abort/length/error で終わった step を stop と誤認したり、過去の run の最終 step を新しい run の途中として数えたりしないため。
+      // Tránh nhầm step bị abort/length/error là stop, hoặc đếm step cuối của run cũ như đang ở giữa run mới.
+      if (lastAssistant?.id && lastAssistant.content?.some((c: any) => c?.type === "tool-call")) stepEnded(sid, String(lastAssistant.id), "tool-calls")
       await core.beforeModelCall(sid, { isControl: false })
       if (core.disabledSessions.has(sid)) return
       if (cfg.explainToPrimary) ev.system.push({ type: "text", text: PRIMARY_EXPLAINER })
@@ -190,7 +258,7 @@ export async function setupV2(ctx: V2Ctx): Promise<(() => void) | void> {
   )
   // 要約やタイトル生成などの補助リクエストにも advise を見せない。
   // Không để các request phụ (tóm tắt, tạo tiêu đề) thấy tool advise.
-  for (const kind of ["compaction", "generate"]) {
+  for (const kind of ["compaction", "generate", "title"] as const) {
     hooks.push(
       ctx.session.hook(kind, (ev: any) => {
         if (!String(ev.agent ?? "").startsWith("advisor-")) delete ev.tools?.advise
@@ -203,6 +271,15 @@ export async function setupV2(ctx: V2Ctx): Promise<(() => void) | void> {
       if (!core.isAdvisorSession(sid)) return
       const proposed = ev.decision?.retry ? Number(ev.decision.delay ?? 0) : 0
       if (core.stopRetrying(sid, { attempt: Number(ev.attempt ?? 1), message: `${ev.error?.type ?? ""} ${ev.error?.message ?? ""}`, waitMs: proposed })) ev.decision = { retry: false }
+    }),
+  )
+  hooks.push(
+    ctx.tool.hook("execute.before", (ev) => {
+      const sid = String(ev.sessionID)
+      if (!core.isAdvisorSession(sid)) return
+      const verdict = core.advisorToolCall(sid, ev.tool, ev.input)
+      if (verdict === "remind") throw new Error(LOOP_REMINDER)
+      if (verdict === "abort") throw new Error(LOOP_STOPPED)
     }),
   )
   // 一部のフックが将来の版で変わっても、他の機能は動かし続ける。
@@ -230,9 +307,9 @@ export async function setupV2(ctx: V2Ctx): Promise<(() => void) | void> {
         permissionTimers.delete(id)
         const what = `${String(d.action ?? "tool")} ${String(d.resources?.[0] ?? "")}`.trim()
         log("warn", "advisor permission request timed out; rejected", { sessionID, permission: id, what })
-        // 2.1.0 の実装は `decision`、ドキュメントは `reply`。どちらの版でも通るよう両方を送る。
-        // Bản 2.1.0 dùng `decision` còn tài liệu ghi `reply`; gửi cả hai để chạy được ở cả hai phiên bản.
-        Promise.resolve(ctx.permission.reply({ sessionID, requestID: id, decision: "reject", reply: "reject" })).catch((e) => log("warn", "could not reject an advisor permission request", { error: errMessage(e) }))
+        // 型定義 (2.1.1) の入力は `decision` だけ。ドキュメントの `reply` は型に無いので送らない。
+        // Kiểu của 2.1.1 chỉ có `decision`; `reply` trong tài liệu không có trong kiểu nên không gửi.
+        Promise.resolve(ctx.permission.reply({ sessionID, requestID: id, decision: "reject" })).catch((e) => log("warn", "could not reject an advisor permission request", { error: errMessage(e) }))
       }, cfg.permissionTimeoutMs),
     })
   }
@@ -251,7 +328,7 @@ export async function setupV2(ctx: V2Ctx): Promise<(() => void) | void> {
     }
     switch (ev.type) {
       case "session.created": {
-        if (!id || dir !== directory) return
+        if (!id || !sameDir(dir)) return
         mine.set(id, true)
         core.sessionCreated({ id, parentID: d.parentID, title: d.title })
         return
@@ -291,6 +368,13 @@ export async function setupV2(ctx: V2Ctx): Promise<(() => void) | void> {
       case "session.compaction.ended":
         core.compacted(id)
         return
+      case "session.revert.committed":
+      case "session.moved":
+        core.historyRewritten(id)
+        return
+      case "session.forked":
+        core.sessionForked(id)
+        return
       case "session.inbox.enqueued":
         if (d.item?.type === "user") core.realUserMessage(id)
         return
@@ -317,6 +401,7 @@ export async function setupV2(ctx: V2Ctx): Promise<(() => void) | void> {
 
   log("info", "advisor ready", { host: "v2", version, advisors: specs.map((s) => ({ name: s.name, enabled: s.enabled, model: s.model ?? null, tools: s.tools })) })
   return () => {
+    releaseLoad(loadKey)
     stop.abort()
     dropPermissionTimers()
     core.stop()
@@ -338,6 +423,18 @@ function evictV2(messages: any[]): void {
     if (m?.role !== "tool" || !Array.isArray(m.content)) continue
     for (const part of m.content) {
       if (part?.type === "tool-result" && isEvictableTool(part.name) && part.result?.type === "text") part.result = { ...part.result, value: EVICTED }
+    }
+  }
+}
+
+// 調査ツールの出力から秘密ファイルの内容を取り除く。grep/glob は権限ではパスを拒否できないため、モデルへ渡す直前に処理する。
+// Loại nội dung file bí mật khỏi output tool điều tra; grep/glob không deny được theo đường dẫn nên xử lý ngay trước khi đưa cho model.
+function scrubV2(messages: any[]): void {
+  for (const m of messages) {
+    if (m?.role !== "tool" || !Array.isArray(m.content)) continue
+    for (const part of m.content) {
+      if (part?.type !== "tool-result" || !isEvictableTool(part.name) || part.result?.type !== "text" || typeof part.result.value !== "string") continue
+      part.result = { ...part.result, value: part.name === "read" ? redact(part.result.value) : scrubSecretOutput(part.result.value) }
     }
   }
 }

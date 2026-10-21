@@ -1,3 +1,4 @@
+import type { LoopVerdict } from "./loopguard.ts"
 import { ADVISOR_TITLE_PREFIX, type Note } from "./types.ts"
 
 /** One in-flight advisor review; the `advise` tool finds it through the advisor's own session id. */
@@ -11,6 +12,8 @@ export interface ReviewCtx {
   notes: Note[]
   quarantined: number
   handleAdvise(args: { note: string; severity?: string }): string
+  /** Called before each investigative tool call of the advisor; says whether it is a harmless call, a repeat to warn about, or one that ends the review. */
+  onToolCall(tool: string, args: unknown): LoopVerdict
 }
 
 export interface UsageSink {

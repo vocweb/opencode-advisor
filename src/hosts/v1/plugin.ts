@@ -3,7 +3,8 @@ import { COMMAND_DESCRIPTION } from "../../commands.ts"
 import { loadConfig } from "../../config.ts"
 import { AdvisorCore } from "../../core.ts"
 import type { Logger } from "../../host.ts"
-import { agentNameFor, evictStaleResults } from "../../policy.ts"
+import { LOOP_REMINDER, LOOP_STOPPED } from "../../loopguard.ts"
+import { agentNameFor, evictStaleResults, scrubInvestigationResults } from "../../policy.ts"
 import { ADVISE_TOOL_DESCRIPTION, buildAdvisorSystemPrompt, PRIMARY_EXPLAINER } from "../../prompts.ts"
 import { ensureStarterConfig } from "../../setup.ts"
 import { CONTROL_TEXT, SELF_MARK } from "../../types.ts"
@@ -43,6 +44,7 @@ export async function createV1Hooks(input: PluginInput): Promise<Hooks> {
   const core = new AdvisorCore({ host, cfg, directory: input.directory, worktree: input.worktree })
   const { registry, specs } = core
   const pendingControl = new Map<string, { text: string; at: number }>()
+  const countedSteps = new Set<string>()
   // 拒否される予定の権限要求 (誰も答えなければ時間切れで reject)。
   // Các yêu cầu quyền đang chờ, sẽ bị từ chối nếu không ai trả lời.
   const permissionTimers = new Map<string, { timer: NodeJS.Timeout; sessionID: string }>()
@@ -60,6 +62,9 @@ export async function createV1Hooks(input: PluginInput): Promise<Hooks> {
     switch (ev.type) {
       case "session.created":
         core.sessionCreated(ev.properties.info)
+        // fork は元の履歴のコピーから始まる。全履歴を再生せず、これからの出来事だけを見る (omp の branch/fork と同じ)。
+        // Fork bắt đầu từ bản sao lịch sử của session khác; không phát lại cả lịch sử mà chỉ xem những gì xảy ra từ giờ (giống branch/fork của omp).
+        if (/\(fork #\d+\)\s*$/.test(String(ev.properties.info.title ?? ""))) core.sessionForked(ev.properties.info.id, ev.properties.info.time?.created)
         break
       case "session.updated":
         core.sessionUpdated(ev.properties.info)
@@ -113,6 +118,14 @@ export async function createV1Hooks(input: PluginInput): Promise<Hooks> {
           break
         }
         if (!info.time?.completed) break
+        // fork 直後に再送される、コピーされた過去の message は新しい作業ではないので数えない。
+        // Message cũ được sao chép gửi lại ngay sau khi fork không phải việc mới nên không đếm.
+        if (core.isCopiedMessage(info.sessionID, info.time?.created)) break
+        // opencode は完了後の assistant message に対しても message.updated を再送しうる。id ごとに 1 回だけ数える。
+        // opencode có thể gửi lại message.updated cho assistant đã hoàn tất; chỉ đếm mỗi id một lần.
+        if (countedSteps.has(info.id)) break
+        countedSteps.add(info.id)
+        if (countedSteps.size > 2000) countedSteps.delete(countedSteps.values().next().value as string)
         core.stepCompleted(info.sessionID, info.finish)
         break
       }
@@ -124,6 +137,11 @@ export async function createV1Hooks(input: PluginInput): Promise<Hooks> {
       }
       case "session.compacted":
         core.compacted(ev.properties.sessionID)
+        break
+      // revert で履歴が書き換わると cursor が存在しない履歴を指す。compaction と同じく advisor を作り直す。
+      // Revert làm lịch sử bị viết lại nên cursor trỏ vào chỗ không còn; giống compaction, dựng lại advisor.
+      case "message.removed":
+        core.historyRewritten(ev.properties.sessionID)
         break
     }
   }
@@ -178,7 +196,9 @@ export async function createV1Hooks(input: PluginInput): Promise<Hooks> {
           template: CONTROL_TEXT,
           description: COMMAND_DESCRIPTION,
           agent: CONTROL_AGENT,
-          ...(parseModel(cfg.controlModel) ? { model: cfg.controlModel } : {}),
+          // 明示の controlModel、なければ small_model (安価で、通常は実在する)。どちらも無ければ session のモデルを使う。
+          // controlModel tường minh, nếu không thì small_model (rẻ và thường có thật); không có cả hai thì dùng model của session.
+          ...(parseModel(cfg.controlModel ?? conf.small_model) ? { model: cfg.controlModel ?? conf.small_model } : {}),
           subtask: false,
         }
       }
@@ -232,10 +252,29 @@ export async function createV1Hooks(input: PluginInput): Promise<Hooks> {
       o.text = p.text
     },
 
+    // advisor が同じ調査ツールを同じ引数で繰り返したら注意し、さらに繰り返せば review を打ち切る。throw した内容はモデルにツールエラーとして見える。
+    // Khi advisor lặp lại cùng tool và tham số thì nhắc, lặp nữa thì dừng review; nội dung ném ra hiện cho model như lỗi của tool.
+    // service tier を付ける。advisor の request には設定どおり、primary の request からは現在の tier を控えておく ("inherit" 用)。
+    // Gắn service tier: request của advisor theo cấu hình; với request của primary thì ghi nhớ tier hiện tại (dùng cho "inherit").
+    "chat.params": async (i, o) => {
+      if (core.isAdvisorSession(i.sessionID)) {
+        const tier = core.advisorServiceTier(i.sessionID, String(i.model.providerID))
+        if (tier) o.options.serviceTier = tier
+      } else core.noteServiceTier(i.sessionID, o.options.serviceTier)
+    },
+
+    "tool.execute.before": async (i, o) => {
+      if (!core.isAdvisorSession(i.sessionID)) return
+      const verdict = core.advisorToolCall(i.sessionID, i.tool, o.args)
+      if (verdict === "remind") throw new Error(LOOP_REMINDER)
+      if (verdict === "abort") throw new Error(LOOP_STOPPED)
+    },
+
     "experimental.chat.messages.transform": async (_i, o) => {
       const sid = o.messages.at(-1)?.info.sessionID
       if (!sid) return
       if (core.isAdvisorSession(sid)) {
+        scrubInvestigationResults(o.messages as any)
         if (cfg.evictStaleResults) evictStaleResults(o.messages as any)
         return
       }

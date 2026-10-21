@@ -1,10 +1,13 @@
 import { control, type CommandCtx } from "./commands.ts"
-import type { AdvisorConfig, AdvisorSpec } from "./config.ts"
+import { configSignature, loadConfig, type AdvisorConfig, type AdvisorSpec } from "./config.ts"
 import { Delivery } from "./delivery.ts"
 import type { Host } from "./host.ts"
+import type { LoopVerdict } from "./loopguard.ts"
 import { agentNameFor } from "./policy.ts"
 import { renderAdvisories } from "./prompts.ts"
+import { resolveServiceTier } from "./tier.ts"
 import { Registry } from "./registry.ts"
+import { applyConfig, type ReloadResult } from "./reload.ts"
 import { AdvisorRuntime } from "./runtime.ts"
 import { SEVERITY_RANK, type Note } from "./types.ts"
 import { errMessage, parseModel } from "./util.ts"
@@ -53,6 +56,7 @@ export class AdvisorCore {
     this.specs = init.cfg.advisors
     this.delivery = new Delivery(init.host, init.cfg)
     this.setupNotice = !this.specs.some((s) => s.model)
+    this.signature = configSignature(this.loadOptions())
     this.commandCtx = {
       cfg: this.cfg,
       specs: this.specs,
@@ -67,7 +71,58 @@ export class AdvisorCore {
       runtimesFor: (id, create) => this.runtimesFor(id, create),
       disposeSession: (id) => this.disposeSession(id),
       applyEnabled: (spec) => this.applyEnabled(spec),
+      reload: () => this.reloadNow(),
     }
+  }
+
+  // ------------------------------------------------------------------ live reload
+
+  private signature: string
+
+  private loadOptions() {
+    return { directory: this.init.directory, ...(this.init.worktree !== undefined ? { worktree: this.init.worktree } : {}) }
+  }
+
+  /** Cheap check at every primary boundary: reload only when a configuration file changed. */
+  maybeReload(): void {
+    let sig: string
+    try {
+      sig = configSignature(this.loadOptions())
+    } catch {
+      return
+    }
+    if (sig === this.signature) return
+    try {
+      const r = this.reloadNow()
+      if (r.applied.length > 0 || r.restart.length > 0) this.log("info", "configuration reloaded", { applied: r.applied, restart: r.restart })
+    } catch (e) {
+      this.log("warn", "could not reload the configuration", { error: errMessage(e) })
+    }
+  }
+
+  /** Load the configuration again and apply it to the running advisors (no restart). */
+  reloadNow(): ReloadResult {
+    this.signature = configSignature(this.loadOptions())
+    const { result, added, toggled, remodeled, agentsStale } = applyConfig(this.cfg, this.specs, loadConfig(this.loadOptions()))
+    // agent 定義を作り直せない host (v1) では、新しい advisor の agent が無いので動かせない。roster から外して再起動が必要と伝える。
+    // Host không dựng lại được định nghĩa agent (v1) thì advisor mới chưa có agent nên chưa chạy được; bỏ khỏi roster và báo cần restart.
+    if (!this.host.refreshAgents) {
+      for (const spec of added.splice(0)) {
+        this.specs.splice(this.specs.indexOf(spec), 1)
+        result.applied = result.applied.filter((a) => a !== `added ${spec.name}`)
+        result.restart.push(`${spec.name}: new advisor`)
+      }
+    }
+    for (const spec of [...added, ...toggled]) this.applyEnabled(spec)
+    // model が変わった runtime は、前の model の失敗や冷却を引きずらないよう作り直す。
+    // Runtime có model đổi thì reset để không mang theo lỗi và cooldown của model cũ.
+    for (const list of this.runtimes.values()) for (const r of list) if (remodeled.some((s) => s.slug === r.spec.slug)) r.reset()
+    // agent 定義 (tool、instructions) は host が対応できるときだけ即座に更新する。
+    if (agentsStale && this.host.refreshAgents) {
+      void this.host.refreshAgents().catch((e) => this.log("warn", "could not refresh the advisor agents", { error: errMessage(e) }))
+      result.applied.push(...result.restart.splice(0).map((r) => `${r} (agents refreshed)`))
+    }
+    return result
   }
 
   private get log() {
@@ -96,6 +151,9 @@ export class AdvisorCore {
   disposeSession(id: string): void {
     this.runtimes.get(id)?.forEach((r) => r.dispose())
     this.runtimes.delete(id)
+    // 配送待ちのノートと aside も捨てる。/advisor off や session 削除の後に古い助言が届かないようにするため。
+    // Bỏ cả note đang chờ giao và aside, để sau /advisor off hay khi xóa session không còn advisory cũ nào được giao.
+    this.delivery.clear(id)
   }
 
   // enable/disable を既存の全セッションの runtime に即反映する。
@@ -137,8 +195,27 @@ export class AdvisorCore {
     }
     if (this.registry.isAdvisorSession(id)) return false
     if (!this.registry.meta.get(id)?.parentID) return true
+    // advisor が作った subagent (その孫を含む) は見ない。見ると advisor が advisor を呼び出して連鎖する。
+    // Không theo dõi subagent do advisor tạo (kể cả các cấp dưới), nếu không advisor sẽ gọi advisor và dây chuyền kéo dài.
+    if (await this.underAdvisor(id)) return false
     if (!this.subSpecs.has(id)) this.subSpecs.set(id, await this.specsForSubagent(id))
     return this.subSpecs.get(id)!.length > 0
+  }
+
+  private async underAdvisor(id: string): Promise<boolean> {
+    let cur = id
+    for (let i = 0; i < 8; i++) {
+      const parent = this.registry.meta.get(cur)?.parentID
+      if (!parent) return false
+      if (this.registry.isAdvisorSession(parent)) return true
+      if (!this.registry.meta.has(parent)) {
+        const s = await this.host.sessionInfo(parent)
+        this.registry.noteSession(s.id, { parentID: s.parentID, title: s.title })
+        if (this.registry.isAdvisorSession(parent)) return true
+      }
+      cur = parent
+    }
+    return false
   }
 
   private whenEligible(id: string, fn: () => void): void {
@@ -225,8 +302,33 @@ export class AdvisorCore {
     if (!this.registry.isAdvisorSession(id)) this.delivery.onAbort(id)
   }
 
+  /** The session's history was rewritten (revert, move): the cursor points into history that no longer exists. */
+  historyRewritten(id: string): void {
+    this.compacted(id)
+  }
+
+  /** A forked session starts from a copy of someone else's history; review only what happens from now on, not the copy. */
+  sessionForked(id: string, createdAt?: number): void {
+    this.registry.fresh.delete(id)
+    if (createdAt !== undefined) this.forkedAt.set(id, createdAt)
+  }
+
+  private forkedAt = new Map<string, number>()
+
+  /**
+   * A message that already existed when the session was forked arrives again as an event right after the fork is created
+   * (opencode copies the history). It is not new work, so it must not trigger a review.
+   */
+  isCopiedMessage(id: string, messageCreated: number | undefined): boolean {
+    const forked = this.forkedAt.get(id)
+    return forked !== undefined && messageCreated !== undefined && messageCreated < forked
+  }
+
   compacted(id: string): void {
     this.runtimes.get(id)?.forEach((r) => r.reset())
+    // 圧縮で履歴が要約に置き換わるので、古い内容を前提にした助言は捨てる。
+    // Lịch sử bị thay bằng bản tóm tắt, nên bỏ các advisory dựa trên nội dung cũ.
+    this.delivery.clear(id)
   }
 
   /** A message typed by the user (not one of ours). */
@@ -244,8 +346,32 @@ export class AdvisorCore {
   // Giữ lần gọi LLM kế của primary tới khi advisor theo kịp; không bắt lệnh /advisor chờ vì đó là lối thoát khi advisor kẹt.
   async beforeModelCall(id: string, opts: { isControl: boolean }): Promise<void> {
     if (this.disabledSessions.has(id) || opts.isControl) return
+    this.maybeReload()
     const rts = this.runtimes.get(id) ?? []
-    if (rts.length > 0) await Promise.all(rts.map((r) => r.waitCaughtUp(r.spec.syncBacklog, this.delivery.abortSignal(id))))
+    const waiting = rts.filter((r) => r.spec.syncBacklog !== "off")
+    if (waiting.length === 0) return
+    await Promise.all(waiting.map((r) => r.waitCaughtUp(r.spec.syncBacklog, this.delivery.abortSignal(id))))
+    await this.delivery.flushNow(id, true)
+  }
+
+  // primary が最後に送った service tier。advisor の tier が "inherit" のときに写す。
+  // Service tier primary gửi gần nhất; dùng khi tier của advisor là "inherit".
+  private primaryTiers = new Map<string, string>()
+
+  noteServiceTier(primarySessionID: string, tier: unknown): void {
+    if (typeof tier === "string" && tier) this.primaryTiers.set(primarySessionID, tier)
+    else this.primaryTiers.delete(primarySessionID)
+  }
+
+  /** The service tier to put on a request of this advisor session, or undefined. */
+  advisorServiceTier(advisorSessionID: string, providerID: string): string | undefined {
+    const parent = this.registry.meta.get(advisorSessionID)?.parentID
+    return resolveServiceTier(this.cfg.serviceTier, providerID, parent ? this.primaryTiers.get(parent) : undefined)
+  }
+
+  /** Loop guard entry point for both hosts: the verdict for one investigative tool call of an advisor session. */
+  advisorToolCall(advisorSessionID: string, tool: string, args: unknown): LoopVerdict {
+    return this.registry.reviews.get(advisorSessionID)?.onToolCall(tool, args) ?? "ok"
   }
 
   /** Non-interrupting notes waiting for the next model call, rendered as one block; undefined when there are none. */

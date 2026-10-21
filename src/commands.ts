@@ -9,7 +9,8 @@ import type { AdvisorRuntime } from "./runtime.ts"
 import { globalWatchdogFile } from "./setup.ts"
 import { ADVISOR_TITLE_PREFIX, type Msg } from "./types.ts"
 import { clip, parseModelSelector, slugify } from "./util.ts"
-import { createTemplate, resolveWatchdogFile, setAdvisorEnabled, setModelRole } from "./yamlio.ts"
+import type { ReloadResult } from "./reload.ts"
+import { createTemplate, resolveWatchdogFile, setAdvisorEnabled, setAdvisorModel, setModelRole } from "./yamlio.ts"
 
 // プラグイン本体なしでも /advisor を動かしテストできるよう、必要なものを一か所に集める。
 // Gom mọi thứ lệnh /advisor cần để chạy và test được mà không cần host plugin.
@@ -33,12 +34,15 @@ export interface CommandCtx {
   // エントリの有効/無効が変わったので、全セッションの runtime を即座に起動/停止する。
   // Entry vừa được bật/tắt nên khởi động/dừng runtime ở mọi session ngay lập tức.
   applyEnabled(spec: AdvisorSpec): void
+  // 設定ファイルを読み直して実行中の advisor に反映する。
+  // Đọc lại file cấu hình và áp dụng cho advisor đang chạy.
+  reload(): ReloadResult
 }
 
-const RESTART_NOTE = "Other configuration changes (tools, instructions, cadence, retry) need an opencode restart."
+const RESTART_NOTE = "Edits to the WATCHDOG files are picked up at the next boundary; `/advisor reload` applies them now."
 
 export const COMMAND_DESCRIPTION =
-  "Control the live advisor: (toggle) | status | on | off | pause | resume | reset | inbox | dump [raw] | configure [init [project|user]] | enable <name> | disable <name> | setup <model>"
+  "Control the live advisor: (toggle) | status | on | off | pause | resume | reset | inbox | dump [raw] | configure [init [project|user]] | enable <name> | disable <name> | model <name> <model> | setup <model> | reload"
 
 export async function control(ctx: CommandCtx, sessionID: string, args: string): Promise<string> {
   const [sub = "", ...rest] = args.trim().split(/\s+/)
@@ -72,6 +76,12 @@ export async function control(ctx: CommandCtx, sessionID: string, args: string):
       return setEnabled(ctx, rest.join(" "), false)
     case "setup":
       return setup(ctx, rest[0])
+    case "model":
+      return setEntryModel(ctx, rest[0], rest[1])
+    case "reload":
+      return reloadReport(ctx.reload())
+    case "entries":
+      return entriesReport(ctx)
     default:
       return `Unknown subcommand \`${[sub, ...rest].join(" ")}\`. Use: ${COMMAND_DESCRIPTION.replace(/^[^:]*: /, "")}.`
   }
@@ -101,16 +111,12 @@ interface Usage {
 
 const advisorName = (title: string) => title.slice(ADVISOR_TITLE_PREFIX.length).trim().replace(/ #\d+$/, "")
 
-async function advisorChildren(ctx: CommandCtx, primaryID: string): Promise<AdvisorChild[]> {
-  return ctx.host.advisorChildren(primaryID)
-}
-
 // 子セッション全体から集計すれば、リセットや再起動をまたいでも合計が正しい。
 // Cộng dồn từ mọi session con của advisor để tổng không mất khi reset hoặc khởi động lại plugin.
 async function usageFromChildren(ctx: CommandCtx, primaryID: string): Promise<Map<string, Usage> | undefined> {
   try {
     const out = new Map<string, Usage>()
-    for (const child of await advisorChildren(ctx, primaryID)) {
+    for (const child of await ctx.host.advisorChildren(primaryID)) {
       const name = advisorName(child.title)
       const u = out.get(name) ?? { cost: 0, tokensIn: 0, tokensOut: 0, contextTokens: 0 }
       const msgs = await ctx.host.transcript(child.id)
@@ -167,6 +173,8 @@ export async function statusReport(ctx: CommandCtx, sessionID: string): Promise<
       `| ${spec.name} | ${stateOf(spec, r)} | ${model} | ${spec.reviewMode}/${spec.reviewInterval} | ${spec.syncBacklog} | ${s?.reviews ?? 0} | ${s ? `${s.notes.nit}/${s.notes.concern}/${s.notes.blocker}` : "0/0/0"} | ${s ? s.rejected + s.quarantined : 0} | ${u?.contextTokens ?? s?.contextTokens ?? 0} | ${u?.tokensIn ?? s?.tokensIn ?? 0}/${u?.tokensOut ?? s?.tokensOut ?? 0} | $${cost.toFixed(4)} | ${r?.pendingDeferred ?? 0} |`,
     )
   }
+  const held = list.flatMap((r) => (r.heldForMs() === undefined ? [] : [`${r.spec.name} (${Math.round(r.heldForMs()! / 1000)}s)`]))
+  if (held.length > 0) lines.push("", `⏳ The primary agent is waiting for: ${held.join(", ")}. \`/advisor reset\` or \`/advisor off\` releases it.`)
   for (const r of list) if (r.lastError) lines.push("", `- ${r.spec.name} last error: ${clip(r.lastError, 300)}`)
   if (list.length === 0 && on) lines.push("", "No review has run in this session yet.")
   if (!specs.some((sp) => sp.model)) lines.push("", "⚠ No advisor model is set. Run `/advisor setup <provider/model>`.")
@@ -215,7 +223,7 @@ function renderDumpMessage(m: Msg, raw: boolean): string[] {
 async function dump(ctx: CommandCtx, sessionID: string, raw: boolean): Promise<string> {
   let children: AdvisorChild[]
   try {
-    children = await advisorChildren(ctx, sessionID)
+    children = await ctx.host.advisorChildren(sessionID)
   } catch (e) {
     return `Could not list advisor sessions: ${e instanceof Error ? e.message : String(e)}`
   }
@@ -258,7 +266,7 @@ function configure(ctx: CommandCtx, rest: string[]): string {
     const scope = (rest[1] ?? "project").toLowerCase()
     if (scope !== "project" && scope !== "user") return "Usage: `/advisor configure init [project|user]`."
     const file = scope === "user" ? userFile : project
-    const r = createTemplate(file)
+    const r = createTemplate(file, file === userFile)
     return r.ok ? `Created \`${r.file}\`. Edit it, then restart opencode. Use \`/advisor enable|disable <name>\` and \`/advisor setup <model>\` for live changes.` : r.error
   }
   const lines = [
@@ -283,7 +291,7 @@ function setEnabled(ctx: CommandCtx, name: string, enabled: boolean): string {
   const spec = ctx.specs.find((s) => s.slug === slug)
   if (!spec) return `No advisor named "${name}". Known: ${ctx.specs.map((s) => s.name).join(", ")}.`
   if (!spec.file) return `"${spec.name}" is the built-in default advisor and is not listed in any WATCHDOG.yml; there is no entry to ${verb}.`
-  const r = setAdvisorEnabled(spec.file, spec.name, enabled)
+  const r = setAdvisorEnabled(spec.file, spec.name, enabled, path.dirname(spec.file) === path.resolve(globalConfigDir(ctx.env)))
   if (!r.ok) return r.error
   spec.enabled = enabled
   ctx.applyEnabled(spec)
@@ -293,7 +301,7 @@ function setEnabled(ctx: CommandCtx, name: string, enabled: boolean): string {
 function setup(ctx: CommandCtx, model: string | undefined): string {
   if (!model) return "Usage: `/advisor setup <provider/model[:level]>` (or `inherit` to use the primary's model). Example: `/advisor setup anthropic/claude-haiku-4-5`."
   if (model !== "inherit" && !parseModelSelector(model)) return `Setup failed: "${model}" is not "provider/model" (or "inherit").`
-  const w = setModelRole(globalWatchdogFile(ctx.env), model)
+  const w = setModelRole(globalWatchdogFile(ctx.env), model, true)
   if (!w.ok) return `Setup failed: ${w.error}`
   // 旧既定モデルを継承していたエントリだけ新モデルに追従し、個別指定は保つ。
   // Chỉ entry kế thừa model mặc định cũ mới đổi theo; entry có model riêng giữ nguyên.
@@ -301,4 +309,30 @@ function setup(ctx: CommandCtx, model: string | undefined): string {
   ctx.cfg.defaultModel = model
   for (const list of ctx.runtimes.values()) list.forEach((r) => r.reset())
   return `Advisor model set to \`${model}\` (saved in \`${w.file}\`) and active now. A project-level WATCHDOG.yml with its own \`modelRoles.advisor\` or per-advisor \`model\` still takes precedence after a restart.`
+}
+
+function setEntryModel(ctx: CommandCtx, name: string | undefined, model: string | undefined): string {
+  if (!name || !model) return "Usage: `/advisor model <name> <provider/model[:level]>` (or `inherit`)."
+  if (model !== "inherit" && !parseModelSelector(model)) return `"${model}" is not "provider/model" (or "inherit").`
+  const spec = ctx.specs.find((s) => s.slug === slugify(name))
+  if (!spec) return `No advisor named "${name}". Known: ${ctx.specs.map((s) => s.name).join(", ")}.`
+  if (!spec.file) return `"${spec.name}" is the built-in default advisor and is not listed in any WATCHDOG.yml; use \`/advisor setup\` to set its model.`
+  const r = setAdvisorModel(spec.file, spec.name, model, path.dirname(spec.file) === path.resolve(globalConfigDir(ctx.env)))
+  if (!r.ok) return r.error
+  spec.model = model
+  for (const list of ctx.runtimes.values()) list.filter((x) => x.spec.slug === spec.slug).forEach((x) => x.reset())
+  return `Advisor "${spec.name}" now uses \`${model}\` (saved in \`${r.file}\`) and is active now.`
+}
+
+function reloadReport(r: ReloadResult): string {
+  const lines = [r.applied.length === 0 && r.restart.length === 0 ? "**Configuration reloaded**: nothing changed." : `**Configuration reloaded**: ${r.applied.join(", ") || "nothing applied"}.`]
+  if (r.restart.length > 0) lines.push(`Needs an opencode restart to take effect: ${r.restart.join("; ")}.`)
+  for (const w of r.warnings) lines.push(`- ⚠ ${w}`)
+  return lines.join("\n")
+}
+
+// TUI プラグインが読む機械可読の一覧。1 行 1 advisor で、タブ区切り: 名前、有効か、モデル、書き換え先の file があるか。
+// Danh sách dạng máy đọc cho plugin TUI: mỗi advisor một dòng, cách nhau bằng tab: tên, đang bật, model, có file để sửa hay không.
+function entriesReport(ctx: CommandCtx): string {
+  return ctx.specs.map((s) => [s.name, s.enabled ? "enabled" : "disabled", s.model ?? "-", s.file ? "file" : "builtin"].join("\t")).join("\n")
 }

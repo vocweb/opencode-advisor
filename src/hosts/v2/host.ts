@@ -1,14 +1,21 @@
+import type { Plugin } from "@opencode/plugin"
 import type { AdvisorChild, DeliverMode, DeliverOptions, Host, Logger, PromptInput, PromptResult } from "../../host.ts"
 import { renderAdvisories } from "../../prompts.ts"
-import { ADVISOR_TITLE_PREFIX, SELF_MARK, type Msg, type Note } from "../../types.ts"
+import { ADVISOR_TITLE_PREFIX, SELF_MARK, SEVERITY_RANK, type Msg, type Note } from "../../types.ts"
 import { lastAssistant, normalizeTranscript } from "./normalize.ts"
 
-// プラグイン文脈 (ctx) は実行時に型なしで受け取る。使うメンバーだけを緩く書き、足りなければ呼び出し側が検出する。
-// ctx của plugin v2 nhận lúc chạy không có kiểu; chỉ mô tả lỏng các thành viên cần dùng, thiếu thì nơi gọi phát hiện.
-export type V2Ctx = Record<string, any>
+// 型は @opencode/plugin のものを使う (型だけの import で、実行時には読み込まない)。API が変わると tsc が検出する。
+// Dùng kiểu của @opencode/plugin (chỉ import kiểu, không nạp lúc chạy) để tsc phát hiện khi API đổi.
+export type V2Ctx = Plugin.Context
+
+// 実行時に届く ctx は v1 の部分的なものかもしれないので、判定の段階では緩い型で扱う。
+// ctx nhận lúc chạy có thể là bản thiếu của v1, nên ở bước nhận diện dùng kiểu lỏng.
+export type LooseCtx = Record<string, any>
 
 // host に提供される toast API は無い。TUI プラグインが入るまでは log だけにする。
 // Server plugin v2 không có API toast; tới khi có plugin TUI thì chỉ ghi log.
+const topSeverity = (notes: Note[]): string => notes.reduce((a, n) => (SEVERITY_RANK[n.severity] > SEVERITY_RANK[a] ? n.severity : a), "nit" as Note["severity"])
+
 export function createV2Host(ctx: V2Ctx, log: Logger): Host {
   const session = ctx.session
   // advisor session ごとに、最後に設定した agent と model を覚えて無駄な切替を避ける。
@@ -25,7 +32,6 @@ export function createV2Host(ctx: V2Ctx, log: Logger): Host {
   }
 
   return {
-    kind: "v2",
     log,
     transcript,
 
@@ -88,13 +94,29 @@ export function createV2Host(ctx: V2Ctx, log: Logger): Host {
       // 中断された実行は error なしで idle(interrupted) だけが残ることがある。
       // Lượt bị ngắt có thể chỉ để lại idle(interrupted) mà không có error.
       if (tail?.type === "idle" && tail.outcome && tail.outcome !== "succeeded") {
+        // idle の error (例: provider.no-route "Model unavailable") が本当の原因。あればそれを使い、無ければ outcome だけを返す。
+        // error của idle (ví dụ provider.no-route "Model unavailable") mới là nguyên nhân thật; có thì dùng, không thì chỉ báo outcome.
+        if (tail.error) return { id: a?.id, error: { name: String(tail.error.type ?? "ExecutionFailed"), message: String(tail.error.message ?? tail.outcome) } }
         return { id: a?.id, error: { name: tail.outcome === "interrupted" ? "MessageAbortedError" : "ExecutionFailed", message: String(tail.outcome) } }
       }
       return { id: a?.id, cost: a?.cost, tokens: a?.tokens }
     },
 
+    async refreshAgents() {
+      await ctx.agent.reload()
+    },
+
+    async modelAvailable(model) {
+      try {
+        const list = (await ctx.model.list()) as unknown as { providerID?: string; id?: string }[]
+        return Array.isArray(list) ? list.some((m) => m.providerID === model.providerID && m.id === model.modelID) : undefined
+      } catch {
+        return undefined
+      }
+    },
+
     async abort(id) {
-      await session.interrupt({ sessionID: id, continue: false })
+      await session.interrupt({ sessionID: id, resume: false })
     },
 
     async advisorChildren(primaryID): Promise<AdvisorChild[]> {
@@ -116,13 +138,21 @@ export function createV2Host(ctx: V2Ctx, log: Logger): Host {
         ...(mode === "card" ? { description: text } : {}),
         resume: mode !== "card",
         delivery: "steer",
-        metadata: { [SELF_MARK]: true },
+        // TUI プラグインが toast を出せるよう、重大度と advisor 名を持たせる。
+        // Mang theo mức nghiêm trọng và tên advisor để plugin TUI hiện được toast.
+        metadata: { [SELF_MARK]: true, severity: topSeverity(notes), advisors: [...new Set(notes.map((n) => n.advisor))], count: notes.length },
       })) as { id?: string } | undefined
       return sent?.id
     },
 
-    toast(message, variant) {
+    // server plugin には toast API が無い。警告とエラーは、その session に短い card として残し、TUI プラグインがあれば toast にする。
+    // Server plugin không có API toast; cảnh báo và lỗi được để lại như một card ngắn trong session đó, và plugin TUI (nếu có) sẽ hiện thành toast.
+    toast(message, variant, _title, sessionID) {
       log(variant === "error" ? "error" : "info", `toast: ${message}`)
+      if (!sessionID || variant === "info") return
+      void Promise.resolve(
+        session.synthetic({ sessionID, text: "[opencode-advisor] notice", description: message, resume: false, delivery: "steer", metadata: { [SELF_MARK]: "notice", variant } }),
+      ).catch(() => {})
     },
   }
 }

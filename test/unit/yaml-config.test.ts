@@ -84,7 +84,7 @@ test("config: a broken entry only costs that entry; invalid values name the entr
   assert.equal(by("Bad").reviewInterval, 1)
   assert.equal(by("Bad").reviewMode, "turn")
   assert.deepEqual(by("Bad").tools, DEFAULT_TOOLS, "no valid tool left -> defaults (as omp)")
-  assert.deepEqual(by("Mixed").tools, ["grep", "glob", "edit"])
+  assert.deepEqual(by("Mixed").tools, ["grep", "glob"], "a project file cannot grant edit; the read-only names are kept")
   assert.deepEqual(by("Silent").tools, [])
   for (const field of ["reviewInterval", "reviewMode", "syncBacklog"]) {
     assert.ok(c.warnings.some((w) => w.includes("advisors[Bad]") && w.includes(field)), field)
@@ -109,14 +109,15 @@ test("config: precedence of maxNotesPerUpdate; omp-only keys are ignored with a 
   const proj = path.join(home, "p")
   write(
     path.join(proj, "WATCHDOG.yml"),
-    "maxNotesPerUpdate: 7\nadvisor: {maxNotesPerUpdate: 2, mystery: 1}\nretry: {usageAwareFallback: true, maxDelayMs: 5}\ntier: {advisor: fast}\nadvisors:\n  - {name: A}\n  - {name: B, maxNotesPerUpdate: 9}\n",
+    "maxNotesPerUpdate: 7\nadvisor: {maxNotesPerUpdate: 2, mystery: 1}\nretry: {usageAwareFallback: true, maxDelayMs: 5}\ntier: {advisor: fast, other: 1}\nadvisors:\n  - {name: A}\n  - {name: B, maxNotesPerUpdate: 9}\n",
   )
   const c = load(home, proj)
   assert.equal(c.advisors.find((a) => a.name === "A")!.maxNotesPerUpdate, 7)
   assert.equal(c.advisors.find((a) => a.name === "B")!.maxNotesPerUpdate, 9)
   assert.equal(c.retry.maxDelayMs, 5)
   assert.ok(c.warnings.some((w) => w.includes('"retry.usageAwareFallback" is not supported by opencode-advisor; ignored')))
-  assert.ok(c.warnings.some((w) => w.includes('"tier.advisor" is not supported')))
+  assert.ok(c.warnings.some((w) => w.includes("tier.advisor must be")), "an unknown tier value is reported")
+  assert.ok(c.warnings.some((w) => w.includes('"tier.other" is not supported')))
   assert.ok(c.warnings.some((w) => w.includes('unknown key "advisor.mystery"')))
 })
 
@@ -180,7 +181,9 @@ test("yamlio: createTemplate never overwrites, and its output loads without warn
   assert.ok(createTemplate(f).ok)
   assert.equal(createTemplate(f).ok, false)
   const c = load(home, path.join(home, "p"))
-  assert.deepEqual(c.warnings, [])
+  // プロジェクトに置いたテンプレートが advisor のモデルを選ぶ旨の通知だけは出てよい。それ以外の警告は出ないこと。
+  // Template đặt trong project chỉ được phép kèm thông báo chọn model; ngoài ra không được có cảnh báo nào.
+  assert.deepEqual(c.warnings.filter((w) => !/chooses the advisor model/.test(w)), [])
   assert.deepEqual(c.advisors.map((a) => [a.name, a.enabled]), [["Security", true], ["Style", false]])
 })
 
@@ -208,4 +211,130 @@ test("config: the published docs/example/WATCHDOG.yml loads cleanly with its doc
   assert.equal(c.advisors[0]!.enabled, false)
   assert.deepEqual(c.advisors[1]!.tools, ["read", "grep"])
   assert.ok(c.advisors[4]!.instructions.includes("CẦN LÀM RÕ"), "the trigger phrase the DEV writes must stay verbatim")
+})
+
+test("config: @imports from a project file stay inside the project and skip secret files; the user's own global file may import from ~", () => {
+  const home = tmp()
+  const proj = path.join(home, "p")
+  write(path.join(home, "outside.md"), "OUTSIDE_SECRET")
+  write(path.join(home, ".aws/credentials"), "AWS_SECRET")
+  write(path.join(proj, "ok.md"), "INSIDE_OK")
+  write(path.join(proj, ".env.local"), "ENV_SECRET")
+  fs.symlinkSync(path.join(home, "outside.md"), path.join(proj, "link.md"))
+  write(path.join(proj, "WATCHDOG.md"), "A @./ok.md\nB @../outside.md\nC @~/.aws/credentials\nD @./.env.local\nE @./link.md\n")
+  write(path.join(home, "xdg/opencode/WATCHDOG.md"), "G @~/outside.md\n")
+  const c = load(home, proj)
+  assert.match(c.watchdog, /INSIDE_OK/)
+  assert.match(c.watchdog, /G OUTSIDE_SECRET/, "the global file is the user's own and may reach into ~")
+  assert.doesNotMatch(c.watchdog, /B OUTSIDE_SECRET/, "a project file cannot climb out of the project")
+  assert.doesNotMatch(c.watchdog, /AWS_SECRET/, "a project file cannot import from ~")
+  assert.doesNotMatch(c.watchdog, /ENV_SECRET/, "secret files are never imported")
+  assert.doesNotMatch(c.watchdog, /E OUTSIDE_SECRET/, "a symlink inside the project cannot smuggle an outside file in")
+})
+
+test("yamlio: writes refuse to follow a symlink and never leave a predictable temp file behind", () => {
+  const dir = tmp()
+  const victim = path.join(dir, "victim.txt")
+  write(victim, "KEEP")
+  const file = path.join(dir, "WATCHDOG.yml")
+  fs.symlinkSync(victim, file)
+  fs.symlinkSync(victim, `${file}.tmp`)
+  const r = setModelRole(file, "a/b")
+  assert.equal(r.ok, false)
+  assert.equal(fs.readFileSync(victim, "utf8"), "KEEP", "the symlink target is untouched")
+  fs.rmSync(file)
+  assert.equal(setModelRole(file, "a/b").ok, true)
+  assert.equal(fs.readFileSync(victim, "utf8"), "KEEP", "a pre-planted <file>.tmp symlink is not followed either")
+  assert.deepEqual(fs.readdirSync(dir).filter((f) => f.endsWith(".tmp") && f !== "WATCHDOG.yml.tmp"), [], "no stray temp file")
+})
+
+test("config: a project file can only grant read-only tools; the user-level file keeps write tools", () => {
+  const home = tmp()
+  const proj = path.join(home, "p")
+  write(path.join(proj, ".opencode/WATCHDOG.yml"), "advisors:\n  - {name: A, tools: [read, bash, edit]}\n  - {name: B, tools: [bash]}\n")
+  write(path.join(home, "xdg/opencode/WATCHDOG.yml"), "advisors:\n  - {name: G, tools: [read, bash]}\n")
+  const c = load(home, proj)
+  const by = (n: string) => c.advisors.find((a) => a.name === n)!
+  assert.deepEqual(by("A").tools, ["read"])
+  assert.deepEqual(by("B").tools, DEFAULT_TOOLS, "everything dropped: fall back to the default investigation tools")
+  assert.deepEqual(by("G").tools, ["read", "bash"])
+  assert.ok(c.warnings.some((w) => /advisors\[A\]\.tools: a project file cannot grant "bash"/.test(w)), c.warnings.join("\n"))
+})
+
+test("yamlio: through a symlink the user's own file is updated in place, a project file is refused", () => {
+  const dir = tmp()
+  const real = path.join(dir, "dotfiles/WATCHDOG.yml")
+  write(real, "# mine\n")
+  const link = path.join(dir, "config/WATCHDOG.yml")
+  fs.mkdirSync(path.dirname(link), { recursive: true })
+  fs.symlinkSync(real, link)
+  assert.equal(setModelRole(link, "a/b", true).ok, true)
+  assert.ok(fs.lstatSync(link).isSymbolicLink(), "the link is still a link")
+  assert.match(fs.readFileSync(real, "utf8"), /# mine[\s\S]*advisor: a\/b/)
+  assert.equal(setModelRole(link, "c/d", false).ok, false)
+  assert.match(fs.readFileSync(real, "utf8"), /advisor: a\/b/, "refused write left the target untouched")
+})
+
+test("config: @import checks the file name, not the parent directory name (credentials-service/ is a normal project dir)", () => {
+  const home = tmp()
+  const proj = path.join(home, "credentials-service")
+  write(path.join(proj, "rules.md"), "RULES_OK")
+  write(path.join(proj, "id_rsa"), "KEY_SECRET")
+  write(path.join(proj, "WATCHDOG.md"), "A @./rules.md\nB @./id_rsa\n")
+  const c = load(home, proj)
+  assert.match(c.watchdog, /A RULES_OK/)
+  assert.doesNotMatch(c.watchdog, /KEY_SECRET/)
+})
+
+test("config: omp tool aliases normalize in the user-level file; a project file cannot grant task, bash or edit", () => {
+  const home = tmp()
+  const proj = path.join(home, "p")
+  write(path.join(home, "xdg/opencode/WATCHDOG.yml"), "advisors:\n  - {name: G, tools: [search, find, write, ast_edit, task, bash]}\n")
+  write(path.join(proj, ".opencode/WATCHDOG.yml"), "advisors:\n  - {name: P, tools: [read, task, bash, edit]}\n")
+  const c = load(home, proj)
+  assert.deepEqual(c.advisors.find((a) => a.name === "G")!.tools, ["grep", "glob", "edit", "task", "bash"])
+  assert.deepEqual(c.advisors.find((a) => a.name === "P")!.tools, ["read"])
+})
+
+test("yamlio: rewriting keeps the file's permission bits", () => {
+  const dir = tmp()
+  const file = path.join(dir, "WATCHDOG.yml")
+  write(file, "# x\n")
+  fs.chmodSync(file, 0o644)
+  assert.equal(setModelRole(file, "a/b").ok, true)
+  assert.equal(fs.statSync(file).mode & 0o777, 0o644)
+})
+
+test("config: a project file that picks the advisor model or fallback chain is flagged; the user-level file is not", () => {
+  const home = tmp()
+  const proj = path.join(home, "p")
+  write(path.join(home, "xdg/opencode/WATCHDOG.yml"), "modelRoles: {advisor: a/b}\nretry: {fallbackChains: {advisor: [c/d]}}\n")
+  assert.deepEqual(load(home, path.join(home, "none")).warnings.filter((w) => /chooses the advisor model/.test(w)), [])
+  write(path.join(proj, ".opencode/WATCHDOG.yml"), "modelRoles: {advisor: x/y}\nadvisors:\n  - {name: A, model: z/w}\nretry: {fallbackChains: {advisor: [q/r]}}\n")
+  const w = load(home, proj).warnings.filter((x) => /chooses the advisor model/.test(x))
+  assert.equal(w.length, 1)
+  assert.match(w[0]!, /modelRoles\.advisor=x\/y.*advisors\[A\]\.model=z\/w.*retry\.fallbackChains/)
+})
+
+test("config: outside Git with exactly one child repository, the advisor is told which project is active", () => {
+  const home = tmp()
+  const work = path.join(home, "work")
+  fs.mkdirSync(path.join(work, "app/.git"), { recursive: true })
+  fs.mkdirSync(path.join(work, "notes"), { recursive: true })
+  assert.match(load(home, work).watchdog, /only child repository is `app\/`/)
+  fs.mkdirSync(path.join(work, "lib/.git"), { recursive: true })
+  assert.doesNotMatch(load(home, work).watchdog, /child repository/, "two child repositories: no guess")
+  assert.doesNotMatch(load(home, path.join(work, "app")).watchdog, /child repository/, "inside a repository: no block")
+})
+
+test("config: tier.advisor accepts none, inherit and the concrete tiers; the nearer file wins; the default is none", () => {
+  const home = tmp()
+  const proj = path.join(home, "p")
+  assert.equal(load(home, proj).serviceTier, "none")
+  write(path.join(home, "xdg/opencode/WATCHDOG.yml"), "tier: {advisor: flex}\n")
+  assert.equal(load(home, proj).serviceTier, "flex")
+  write(path.join(proj, ".opencode/WATCHDOG.yml"), "tier: {advisor: inherit}\n")
+  const c = load(home, proj)
+  assert.equal(c.serviceTier, "inherit")
+  assert.deepEqual(c.warnings.filter((w) => /tier/.test(w)), [])
 })

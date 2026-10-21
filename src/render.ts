@@ -72,13 +72,39 @@ function renderTool(p: AnyPart, o: RenderOptions): string {
   return lines.join("\n")
 }
 
-export function renderMessage(m: Msg, o: RenderOptions): string {
+// opencode が付ける <system-reminder> は人間の入力ではない。plan mode のものは制約として原文を残し、他は 1 行に畳む。
+// <system-reminder> do opencode thêm vào không phải đầu vào của người dùng; loại plan mode thì giữ nguyên văn như ràng buộc, còn lại gấp thành một dòng.
+const REMINDER_RE = /^\s*<system-reminder>/i
+const PLAN_MODE_RE = /plan mode/i
+const isReminder = (p: AnyPart): boolean => p.type === "text" && p.synthetic === true && typeof p.text === "string" && REMINDER_RE.test(p.text)
+
+function renderReminders(parts: AnyPart[], o: RenderOptions, seen: Set<string>): string[] {
+  const out: string[] = []
+  for (const p of parts) {
+    const text = String(p.text ?? "").trim()
+    if (PLAN_MODE_RE.test(text)) {
+      // 同じ制約が毎ターン繰り返されるので、同一内容は一度だけ出す。
+      // Cùng một ràng buộc lặp lại mỗi lượt nên nội dung giống hệt chỉ xuất hiện một lần.
+      if (seen.has(text)) continue
+      seen.add(text)
+      out.push(`<primary-context kind="plan-mode">${escapeLt(truncateMiddle(text, o.maxMessageChars))}</primary-context>`)
+    } else {
+      out.push(`<hidden>${escapeLt(truncateMiddle(text.replace(/<\/?system-reminder>/gi, "").replace(/\s+/g, " ").trim(), 120))}</hidden>`)
+    }
+  }
+  return out
+}
+
+export function renderMessage(m: Msg, o: RenderOptions, seen: Set<string> = new Set()): string {
   const info = m.info
   if (info.role === "user") {
-    const t = textOf(m.parts)
-    const files = m.parts.filter((p) => p.type === "file").length
+    const parts = m.parts as AnyPart[]
+    const reminders = renderReminders(parts.filter(isReminder), o, seen)
+    const t = textOf(parts.filter((p) => !isReminder(p)))
+    const files = parts.filter((p) => p.type === "file").length
+    if (!t && !files && reminders.length > 0) return reminders.join("\n")
     const body = (t || "(no text)") + (files ? `\n(+${files} attached file${files > 1 ? "s" : ""})` : "")
-    return `<user id="${info.id}">\n${escapeLt(truncateMiddle(body, o.maxMessageChars))}\n</user>`
+    return [...reminders, `<user id="${info.id}">\n${escapeLt(truncateMiddle(body, o.maxMessageChars))}\n</user>`].join("\n")
   }
   const a = info
   const out: string[] = []
@@ -114,6 +140,7 @@ export function renderMessage(m: Msg, o: RenderOptions): string {
 /** Render a delta; everything is passed through secret redaction as the last step. */
 export function renderDelta(msgs: Msg[], o: RenderOptions): string {
   const controlUsers = new Set<string>()
+  const seenReminders = new Set<string>()
   const chunks: string[] = []
   for (const m of msgs) {
     if (m.info.role === "user") {
@@ -123,7 +150,7 @@ export function renderDelta(msgs: Msg[], o: RenderOptions): string {
     } else if ((m.info as { agent?: string }).agent === "advisor-ctl" || controlUsers.has((m.info as { parentID?: string }).parentID ?? "")) {
       continue // assistant reply to one of our own control prompts
     }
-    chunks.push(renderMessage(m, o))
+    chunks.push(renderMessage(m, o, seenReminders))
   }
   return redact(chunks.join("\n"))
 }

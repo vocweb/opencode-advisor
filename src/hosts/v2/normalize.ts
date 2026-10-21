@@ -65,6 +65,7 @@ export function normalizeMessage(m: Json): Msg | undefined {
           agent: m.agent,
           mode: m.agent,
           ...(m.model ? { model: { providerID: m.model.providerID, modelID: m.model.id }, providerID: m.model.providerID, modelID: m.model.id } : {}),
+          ...(m.model?.variant ? { variant: String(m.model.variant) } : {}),
           time: { created, ...(m.time?.completed ? { completed: m.time.completed } : {}) },
           ...(m.finish ? { finish: m.finish } : {}),
           ...(err ? { error: { name: String(err.type ?? "Error"), data: { message: String(err.message ?? "") } } } : {}),

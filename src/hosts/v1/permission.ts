@@ -13,8 +13,8 @@ function readPermission(): Record<string, string> {
 // Quyền của agent advisor: mặc định từ chối hết; chỉ cho advise và tool điều tra, tool ghi theo luật của người dùng (không có thì ask).
 export function advisorPermission(spec: AdvisorSpec, user?: unknown): Record<string, unknown> {
   const perm: Record<string, unknown> = { "*": "deny", advise: "allow" }
-  // 利用者の規則は ツール個別 → "*" の順に探す (個別の deny は "*" の allow に勝つ)。
-  // Luật của người dùng tra theo tool riêng rồi mới tới "*" (deny riêng thắng allow của "*").
+  // 利用者の規則は ツール個別 → "*" の順に探す。リポジトリ側がツールを付与できないことは設定の読み込み側 (config.ts) で保証する。
+  // Tra luật của người dùng theo tool riêng rồi tới "*"; việc repo không được cấp tool ghi đã được đảm bảo ở phía đọc cấu hình (config.ts).
   const userRule = (tool: string): unknown => {
     if (typeof user === "string") return user
     if (user && typeof user === "object") {

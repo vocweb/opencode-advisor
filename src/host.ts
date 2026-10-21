@@ -39,7 +39,6 @@ export interface PromptInput {
  * v1 and v2 each implement it; the core (runtime, delivery, commands, route, guard, config...) never touches an SDK.
  */
 export interface Host {
-  readonly kind: "v1" | "v2"
   readonly log: Logger
 
   /** Transcript of any session in a normalized shape; `limit` = the last N messages (all when omitted). */
@@ -55,6 +54,18 @@ export interface Host {
   /** Run one advisor prompt to completion. Never throws for provider errors: they come back in `error`. */
   promptAdvisor(sessionID: string, input: PromptInput): Promise<PromptResult>
   abort(sessionID: string): Promise<void>
+  /**
+   * Ask the host to summarize an advisor session so it can keep going instead of being rebuilt.
+   * Returns false when the host cannot do it or it failed; the caller then re-primes. Absent on hosts without a usable summarize.
+   */
+  compactAdvisor?(sessionID: string, model: ModelRef): Promise<boolean>
+  /** Rebuild the advisors' agent definitions (tools, instructions) after a configuration change; absent when the host cannot. */
+  refreshAgents?(): Promise<void>
+  /**
+   * Whether the host's model catalog contains `model`; undefined when that cannot be determined.
+   * Used to tell "the model does not exist (yet)" from other failures, because some hosts report it only as an opaque error.
+   */
+  modelAvailable?(model: ModelRef): Promise<boolean | undefined>
   /** Sessions created for the advisors of `primaryID`, oldest first (for status/dump and restarts). */
   advisorChildren(primaryID: string): Promise<AdvisorChild[]>
 
@@ -66,5 +77,6 @@ export interface Host {
    */
   afterInject?(primaryID: string, postedID: string | undefined, state: () => { busy: boolean; suppressed: boolean }): Promise<void>
 
-  toast(message: string, variant: "info" | "warning" | "error", title?: string): void
+  /** `sessionID` ties a notice to a session so hosts without a toast API can still show it in that session. */
+  toast(message: string, variant: "info" | "warning" | "error", title?: string, sessionID?: string): void
 }

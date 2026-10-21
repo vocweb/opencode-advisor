@@ -1,14 +1,18 @@
 import type { RetryConfig } from "./config.ts"
 import { parseModelSelector } from "./util.ts"
 
-export type FailureKind = "usage-limit" | "refusal" | "other"
+export type FailureKind = "usage-limit" | "refusal" | "no-model" | "other"
 export type FailureOutcome = "switched" | "stay" | "exhausted"
 
 const USAGE_RE = /usage.?limit|quota|rate.?limit|too many requests|429|insufficient/i
 const REFUSAL_RE = /refus/i
+// モデルがカタログにまだ無い (後から現れるかもしれない) 場合。他の失敗と違い、待てば直る可能性がある。
+// Model chưa có trong danh mục (có thể xuất hiện muộn); khác các lỗi khác, chờ có thể tự hết.
+const NO_MODEL_RE = /ModelNotFound|no-route|Model unavailable|model\b.{0,40}\bnot found|unknown model|no such model|model\b.{0,40}\bnot available/i
 
 export function classifyFailure(name: string, message: string): FailureKind {
   const text = `${name} ${message}`
+  if (NO_MODEL_RE.test(text)) return "no-model"
   if (USAGE_RE.test(text)) return "usage-limit"
   if (REFUSAL_RE.test(text)) return "refusal"
   return "other"
@@ -88,7 +92,7 @@ export class ModelChain {
     // fallback 側の拒否は通常の失敗と同じく冷却し、固定しない。
     // Primary từ chối là phán đoán về nội dung, không phải lỗi model: không cooldown, ghim sang fallback.
     // Fallback từ chối thì cooldown như lỗi thường và không ghim.
-    if (kind === "refusal" && idx === 0) {
+    if (kind === "refusal" && idx === 0 && this.floor < 1) {
       this.floor = 1
       return "switched"
     }
@@ -97,7 +101,9 @@ export class ModelChain {
     const next = this.current()
     const nextIdx = next ? chain.indexOf(next) : -1
     const nextCooled = next !== undefined && (this.cooldown.get(next) ?? 0) > this.now()
-    if (next && next !== failing && !nextCooled) {
+    // floor より下 (主モデル) へ戻る切替は行わない。両方が拒否すると互いに切り替えて無限ループになるため。
+    // Không chuyển ngược về model dưới floor (model chính); nếu cả hai cùng từ chối thì sẽ đổi qua lại vô hạn.
+    if (next && next !== failing && !nextCooled && nextIdx >= this.floor) {
       if (this.retry.fallbackRevertPolicy === "never") this.floor = Math.max(this.floor, nextIdx)
       return "switched"
     }

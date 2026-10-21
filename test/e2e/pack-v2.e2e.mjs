@@ -1,13 +1,18 @@
 // Installs the packed npm tarball on opencode 2.x through opencode.json "plugins" (the v2 key) and checks it works.
 import { execFileSync } from "node:child_process"
+import fs from "node:fs"
+import os from "node:os"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
 import { createRunner, makeEnvV2 } from "./lib-v2.mjs"
 
 const here = path.dirname(fileURLToPath(import.meta.url))
 const pkgDir = path.resolve(here, "../..")
-const out = execFileSync("npm", ["pack", "--silent", "--pack-destination", "/tmp"], { cwd: pkgDir, encoding: "utf8" }).trim().split("\n").pop()
-const tgz = path.join("/tmp", out)
+// 各実行が専用のディレクトリに pack し、並行実行でも tarball を奪い合わない。
+// Mỗi lần chạy pack vào thư mục riêng để chạy song song không giành nhau một tarball.
+const packDir = fs.mkdtempSync(path.join(os.tmpdir(), "advisor-pack-"))
+const out = execFileSync("npm", ["pack", "--silent", "--pack-destination", packDir], { cwd: pkgDir, encoding: "utf8" }).trim().split("\n").pop()
+const tgz = path.join(packDir, out)
 const R = createRunner()
 
 await R.scenario(`pack (v2): ${out} installed via opencode.json "plugins" works end to end`, async (check) => {

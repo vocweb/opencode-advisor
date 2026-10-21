@@ -15,7 +15,7 @@ test("advisorPermission: investigative tools never ask, writes follow the user's
   assert.equal((p.read as Record<string, string>)["*.env"], "deny", "secret files stay denied")
 })
 
-test("advisorPermission: a plain string rule, a '*' rule and a pattern map are carried over as the user wrote them", () => {
+test("advisorPermission: a plain string rule, a '*' rule and a pattern map are carried over as the user wrote them (repo files cannot grant write tools, see config.ts)", () => {
   assert.equal(advisorPermission(spec(["edit"]), "allow").edit, "allow")
   assert.equal(advisorPermission(spec(["edit"]), { "*": "allow" }).edit, "allow")
   const bash = { "*": "ask", "git *": "allow" }
