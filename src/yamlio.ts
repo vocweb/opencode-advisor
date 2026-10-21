@@ -25,7 +25,10 @@ function writeAtomic(file: string, text: string, allowSymlink: boolean): void {
     target = fs.realpathSync(file)
   }
   const tmp = path.join(path.dirname(target), `.${path.basename(target)}.${randomBytes(6).toString("hex")}.tmp`)
-  fs.writeFileSync(tmp, text, { flag: "wx", mode: 0o600 })
+  // 既存ファイルの権限を引き継ぎ、dotfiles の 0644 を 0600 に変えない。新規ファイルは 0600。
+  // Giữ quyền của file hiện có để không biến 0644 của dotfiles thành 0600; file mới thì 0600.
+  const mode = fs.statSync(target, { throwIfNoEntry: false })?.mode
+  fs.writeFileSync(tmp, text, { flag: "wx", mode: mode === undefined ? 0o600 : mode & 0o777 })
   try {
     fs.renameSync(tmp, target)
   } catch (e) {
