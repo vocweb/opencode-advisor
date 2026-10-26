@@ -9,8 +9,8 @@ export const EXAMPLE_YAML = `# opencode-advisor configuration (schema mirrors oh
 instructions: |
   Prefer small, concrete findings. Flag missing tests for changed behaviour.
 
-# Default model of every advisor without its own "model". REQUIRED for reviews to run.
-# Mô hình mặc định cho mọi advisor không có "model" riêng. BẮT BUỘC để review chạy.
+# Default model of every advisor without its own "model". Optional: when omitted (or "inherit"), advisors use the model the main agent is currently using.
+# Mô hình mặc định cho mọi advisor không có "model" riêng. Không bắt buộc: bỏ trống (hoặc "inherit") thì advisor dùng model mà agent chính đang dùng.
 modelRoles:
   advisor: anthropic/claude-haiku-4-5
 
@@ -59,9 +59,9 @@ advisors:
       Naming, dead code, consistency with the surrounding codebase.
 `
 
-// 初回に残す最小ファイル。モデルの置き場所だけを示す。
-// File tối thiểu để lại ở lần chạy đầu, chỉ chỉ chỗ đặt model.
-export const STARTER_YAML = `# opencode-advisor: set a reviewer model, or run \`/advisor setup <provider/model>\`.
+// 初回に残す最小ファイル。モデル未設定でも primary のモデルで動くことと、固定したい場合の置き場所を示す。
+// File tối thiểu để lại ở lần chạy đầu: không đặt model vẫn chạy bằng model của primary, và chỉ chỗ đặt khi muốn cố định.
+export const STARTER_YAML = `# opencode-advisor: advisors use the main agent's current model by default. To pin a cheaper reviewer, set a model or run \`/advisor setup <provider/model>\`.
 # See WATCHDOG.example.yml in the plugin repository for every option.
 # Đặt model cho advisor, hoặc chạy \`/advisor setup <provider/model>\`.
 advisor:

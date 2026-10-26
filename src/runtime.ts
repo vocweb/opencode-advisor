@@ -135,7 +135,7 @@ export class AdvisorRuntime {
 
   constructor(private deps: RuntimeDeps) {
     this.guard = new EmissionGuard(deps.spec.maxNotesPerUpdate)
-    this.chain = new ModelChain(deps.cfg.retry, () => this.deps.spec.model)
+    this.chain = new ModelChain(deps.cfg.retry, () => this.deps.spec.model ?? "inherit")
   }
 
   get status(): RuntimeStatus {
@@ -551,10 +551,12 @@ export class AdvisorRuntime {
     const model = this.resolveModel(msgs)
     if (!model) {
       this.status = "no_model"
-      if (this.spec.model !== "inherit") this.dormant = true
-      if (!this.warnedNoModel) {
+      // model 未設定は inherit と同じ扱い。primary の最初のメッセージが来るまでの一時的な no_model なので休眠させない。
+      // Chưa đặt model được coi như inherit; chỉ là no_model tạm thời tới khi có message đầu của primary nên không cho ngủ.
+      if (this.spec.model && this.spec.model !== "inherit") this.dormant = true
+      if (this.dormant && !this.warnedNoModel) {
         this.warnedNoModel = true
-        const why = this.spec.model ? `cannot parse model "${this.spec.model}" (expected "provider/model")` : `no model configured`
+        const why = `cannot parse model "${this.spec.model}" (expected "provider/model")`
         log("warn", `advisor "${this.spec.name}" is dormant: ${why}`)
         this.toast(`Advisor "${this.spec.name}" is dormant: ${why}. Run /advisor setup <provider/model>, or set "modelRoles.advisor" in WATCHDOG.yml.`, "warning")
       }
