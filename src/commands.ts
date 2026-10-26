@@ -140,7 +140,7 @@ async function usageFromChildren(ctx: CommandCtx, primaryID: string): Promise<Ma
 
 function stateOf(spec: AdvisorSpec, r: AdvisorRuntime | undefined): string {
   if (!spec.enabled) return "paused"
-  if (!r) return spec.model ? "idle" : "inactive/no_model"
+  if (!r) return "idle"
   switch (r.status) {
     case "failed":
       return "halted"
@@ -167,7 +167,7 @@ export async function statusReport(ctx: CommandCtx, sessionID: string): Promise<
     const r = list.find((x) => x.spec.slug === spec.slug)
     const s = r?.stats
     const u = usage?.get(spec.name)
-    const model = r ? `${r.chain.current() ?? r.spec.model ?? "-"}${r.chain.isFallback() ? " (fallback)" : ""}` : (spec.model ?? "-")
+    const model = r ? `${r.chain.current() ?? r.spec.model ?? "inherit"}${r.chain.isFallback() ? " (fallback)" : ""}` : (spec.model ?? "inherit")
     const cost = u?.cost ?? s?.cost ?? 0
     lines.push(
       `| ${spec.name} | ${stateOf(spec, r)} | ${model} | ${spec.reviewMode}/${spec.reviewInterval} | ${spec.syncBacklog} | ${s?.reviews ?? 0} | ${s ? `${s.notes.nit}/${s.notes.concern}/${s.notes.blocker}` : "0/0/0"} | ${s ? s.rejected + s.quarantined : 0} | ${u?.contextTokens ?? s?.contextTokens ?? 0} | ${u?.tokensIn ?? s?.tokensIn ?? 0}/${u?.tokensOut ?? s?.tokensOut ?? 0} | $${cost.toFixed(4)} | ${r?.pendingDeferred ?? 0} |`,
@@ -277,7 +277,7 @@ function configure(ctx: CommandCtx, rest: string[]): string {
     "- Create a sample with `/advisor configure init [project|user]`.",
     "",
     "Advisors:",
-    ...ctx.specs.map((s) => `- ${s.name}: ${s.enabled ? "enabled" : "disabled"} · ${s.model ?? "no model"} · ${s.reviewMode}/${s.reviewInterval}${s.file ? ` · \`${s.file}\`` : ""}`),
+    ...ctx.specs.map((s) => `- ${s.name}: ${s.enabled ? "enabled" : "disabled"} · ${s.model ?? "inherit"} · ${s.reviewMode}/${s.reviewInterval}${s.file ? ` · \`${s.file}\`` : ""}`),
   ]
   if (ctx.cfg.warnings.length) lines.push("", "Warnings:", ...ctx.cfg.warnings.map((w) => `- ⚠ ${w}`))
   lines.push("", RESTART_NOTE)
@@ -334,5 +334,5 @@ function reloadReport(r: ReloadResult): string {
 // TUI プラグインが読む機械可読の一覧。1 行 1 advisor で、タブ区切り: 名前、有効か、モデル、書き換え先の file があるか。
 // Danh sách dạng máy đọc cho plugin TUI: mỗi advisor một dòng, cách nhau bằng tab: tên, đang bật, model, có file để sửa hay không.
 function entriesReport(ctx: CommandCtx): string {
-  return ctx.specs.map((s) => [s.name, s.enabled ? "enabled" : "disabled", s.model ?? "-", s.file ? "file" : "builtin"].join("\t")).join("\n")
+  return ctx.specs.map((s) => [s.name, s.enabled ? "enabled" : "disabled", s.model ?? "inherit", s.file ? "file" : "builtin"].join("\t")).join("\n")
 }
