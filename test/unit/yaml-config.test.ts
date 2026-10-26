@@ -15,7 +15,7 @@ function load(home: string, proj: string, env: NodeJS.ProcessEnv = {}) {
   return loadConfig({ directory: proj, home, env: { XDG_CONFIG_HOME: path.join(home, "xdg"), ...env } })
 }
 
-test("config: no files -> one dormant default advisor with omp defaults", () => {
+test("config: no files -> one default advisor that inherits the primary model with omp defaults", () => {
   const home = tmp()
   const c = load(home, path.join(home, "p"))
   assert.equal(c.advisors.length, 1)

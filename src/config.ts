@@ -27,8 +27,8 @@ export interface AdvisorSpec {
   name: string
   slug: string
   enabled: boolean
-  // モデル指定。inherit は主モデルを使い、未設定なら設定されるまで休眠する。
-  // Chỉ định model; inherit dùng model của primary, chưa đặt thì ngủ cho tới khi được cấu hình.
+  // モデル指定。inherit または未設定なら primary が今使っているモデルを使う。
+  // Chỉ định model; inherit hoặc chưa đặt thì dùng model mà primary đang dùng.
   model: string | undefined
   // advise に加えて与える調査ツール (opencode 名)。
   // Các tool điều tra cấp thêm ngoài advise (tên theo opencode).
